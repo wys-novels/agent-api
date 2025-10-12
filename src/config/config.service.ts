@@ -97,4 +97,38 @@ export class ConfigService implements IConfig {
       this.logger.error('Failed to load API secrets:', error.message);
     }
   }
+
+  async getOpenAIApiKey(): Promise<string> {
+    try {
+      const globalSecrets = await this.vaultService.readSecret('global');
+      return globalSecrets?.openai_api_key || '';
+    } catch (error) {
+      this.logger.error('Failed to get OpenAI API key from Vault:', error.message);
+      return '';
+    }
+  }
+
+  async getOpenAIConfig(): Promise<{
+    model: string;
+    temperature: number;
+    maxTokens: number;
+  }> {
+    try {
+      const lifeSecrets = await this.vaultService.readSecret('life');
+      
+      return {
+        model: lifeSecrets?.openai_model || 'gpt-4o',
+        temperature: parseFloat(lifeSecrets?.openai_temperature || '0.7'),
+        maxTokens: parseInt(lifeSecrets?.openai_max_tokens || '1000'),
+      };
+    } catch (error) {
+      this.logger.error('Failed to get OpenAI config from Vault:', error.message);
+      // Возвращаем значения по умолчанию
+      return {
+        model: 'gpt-4o',
+        temperature: 0.7,
+        maxTokens: 1000,
+      };
+    }
+  }
 }

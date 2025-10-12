@@ -15,4 +15,11 @@ export interface IConfig {
   api: {
     proxyApiKey: string;
   };
+  // Методы для динамического получения параметров OpenAI
+  getOpenAIApiKey(): Promise<string>;
+  getOpenAIConfig(): Promise<{
+    model: string;
+    temperature: number;
+    maxTokens: number;
+  }>;
 }
