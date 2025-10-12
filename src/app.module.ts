@@ -4,6 +4,7 @@ import { DatabaseModule } from './database/database.module';
 import { VaultModule } from './vault/vault.module';
 import { OpenAIModule } from './openai/openai.module';
 import { AgentModule } from './agent/agent.module';
+import { ClassifierModule } from './classifier/classifier.module';
 
 @Module({
   imports: [
@@ -11,6 +12,7 @@ import { AgentModule } from './agent/agent.module';
     ConfigModule,
     DatabaseModule,
     OpenAIModule,
+    ClassifierModule,
     AgentModule,
   ],
   controllers: [],
