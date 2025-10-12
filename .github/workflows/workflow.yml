@@ -125,7 +125,7 @@ jobs:
             sudo docker run -d \
               --name ${{ env.PROJECT_NAME }} \
               --restart unless-stopped \
-              -p ${{ steps.vault.outputs.APP_PORT }}:${{ steps.vault.outputs.APP_PORT }} \
+              -p ${{ steps.vault.outputs.APP_PORT }}:3000 \
               -e VAULT_ADDR="${{ secrets.VAULT_URL }}" \
               -e VAULT_TOKEN="${{ steps.vault.outputs.VAULT_TOKEN }}" \
               -e NODE_ENV="production" \
