@@ -109,6 +109,7 @@ jobs:
             secret/data/servers/${{ env.ENV }}-2-SERVER SERVER_SSH_KEY | SERVER_SSH_KEY ;
             secret/data/global/ghcr GHCR_PAT | GHCR_PAT ;
             secret/data/global/vault VAULT_TOKEN | VAULT_TOKEN ;
+            secret/data/apps/${{ env.PROJECT_NAME }} PORT | APP_PORT ;
 
       - name: Deploy to Server via SSH
         uses: appleboy/ssh-action@v1.0.3
@@ -124,8 +125,9 @@ jobs:
             sudo docker run -d \
               --name ${{ env.PROJECT_NAME }} \
               --restart unless-stopped \
-              -p 3000:3000 \
+              -p ${{ steps.vault.outputs.APP_PORT || '3000' }}:${{ steps.vault.outputs.APP_PORT || '3000' }} \
               -e VAULT_ADDR="${{ secrets.VAULT_URL }}" \
               -e VAULT_TOKEN="${{ steps.vault.outputs.VAULT_TOKEN }}" \
+              -e PORT="${{ steps.vault.outputs.APP_PORT || '3000' }}" \
               -e NODE_ENV="production" \
               ghcr.io/${{ github.repository_owner }}/${{ env.PROJECT_NAME }}:${{ env.TAG_NAME }}
