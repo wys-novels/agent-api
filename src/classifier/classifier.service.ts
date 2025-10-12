@@ -46,24 +46,30 @@ export class ClassifierService {
   private buildClassificationPrompt(message: string): string {
     const availableCommands = this.getAvailableCommands();
     
-    return `Проанализируй следующий запрос пользователя и разбей его на задачи с соответствующими командами.
+    return `<task>
+Проанализируй следующий запрос пользователя и разбей его на задачи с соответствующими командами.
+</task>
 
-Доступные команды:
+<available_commands>
 ${availableCommands}
+</available_commands>
 
-Запрос пользователя: "${message}"
+<user_request>
+"${message}"
+</user_request>
 
-Правила разбиения:
+<rules>
 1. Если запрос требует получения данных из интернета/API - создай задачу HTTP_TOOL с соответствующим промптом
 2. Если запрос требует простого ответа или объяснения - создай задачу GENERATE с полным промптом
 3. GENERATE всегда должен быть последней задачей в цепочке
 4. Для каждой задачи укажи команду и промпт в формате: "КОМАНДА: промпт"
+</rules>
 
-Пример ответа:
-HTTP_TOOL: Получить погоду в Москве
-GENERATE: Ответить пользователю о погоде в Москве
+<response_format>
+КОМАНДА: промпт
+</response_format>
 
-Ответ:`;
+<response>`;
   }
 
   private getAvailableCommands(): string {
