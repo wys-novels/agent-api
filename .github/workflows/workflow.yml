@@ -1,0 +1,131 @@
+name: Deploy to Server
+
+on:
+  push:
+    branches:
+      - '*'
+    paths:
+      - 'src/**'
+      - 'package.json'
+      - 'tsconfig.json'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Окружение для запуска'
+        required: true
+        default: 'DEV'
+        type: choice
+        options:
+          - DEV
+          - PROD
+
+env:
+  PROJECT_NAME: ${{ github.event.repository.name }}
+  ENV: ${{ github.event.inputs.environment || 'DEV' }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Cache dependencies
+        uses: actions/cache@v3
+        with:
+          path: node_modules
+          key: ${{ runner.os }}-node-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-node-
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build app
+        run: npm run build
+
+      - name: Extract metadata (tags, labels) for Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/${{ env.PROJECT_NAME }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push Docker image
+        id: push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            BUILDKIT_INLINE_CACHE=1
+
+  deploy:
+    environment: ${{ github.event.inputs.environment || 'DEV' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write  
+    needs: build
+    steps:
+      - name: Sanitize branch name
+        id: sanitize
+        run: echo "TAG_NAME=$(echo '${{ github.ref_name }}' | sed 's/\//-/g')" >> $GITHUB_ENV
+
+      - name: Get secrets from Vault
+        id: vault
+        uses: hashicorp/vault-action@v3.4.0
+        with:
+          url: ${{ secrets.VAULT_URL }}
+          method: jwt
+          role: github-actions
+          path: jwt
+          secrets: |
+            secret/data/servers/${{ env.ENV }}-2-SERVER SERVER_IP | SERVER_IP ;
+            secret/data/servers/${{ env.ENV }}-2-SERVER SERVER_USER | SERVER_USER ;
+            secret/data/servers/${{ env.ENV }}-2-SERVER SERVER_SSH_KEY | SERVER_SSH_KEY ;
+            secret/data/global/ghcr GHCR_PAT | GHCR_PAT ;
+            secret/data/global/vault VAULT_TOKEN | VAULT_TOKEN ;
+
+      - name: Deploy to Server via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ steps.vault.outputs.SERVER_IP }}
+          username: ${{ steps.vault.outputs.SERVER_USER }}
+          key: ${{ steps.vault.outputs.SERVER_SSH_KEY }}
+          script: |
+            echo "${{ steps.vault.outputs.GHCR_PAT }}" | sudo docker login ghcr.io -u ${{ github.actor }} --password-stdin
+            sudo docker pull ghcr.io/${{ github.repository_owner }}/${{ env.PROJECT_NAME }}:${{ env.TAG_NAME }}
+            sudo docker stop ${{ env.PROJECT_NAME }} || true
+            sudo docker rm ${{ env.PROJECT_NAME }} || true
+            sudo docker run -d \
+              --name ${{ env.PROJECT_NAME }} \
+              --restart unless-stopped \
+              -p 3000:3000 \
+              -e VAULT_ADDR="${{ secrets.VAULT_URL }}" \
+              -e VAULT_TOKEN="${{ steps.vault.outputs.VAULT_TOKEN }}" \
+              -e NODE_ENV="production" \
+              ghcr.io/${{ github.repository_owner }}/${{ env.PROJECT_NAME }}:${{ env.TAG_NAME }}
