@@ -128,6 +128,5 @@ jobs:
               -p ${{ steps.vault.outputs.APP_PORT }}:${{ steps.vault.outputs.APP_PORT }} \
               -e VAULT_ADDR="${{ secrets.VAULT_URL }}" \
               -e VAULT_TOKEN="${{ steps.vault.outputs.VAULT_TOKEN }}" \
-              -e PORT="${{ steps.vault.outputs.APP_PORT }}" \
               -e NODE_ENV="production" \
               ghcr.io/${{ github.repository_owner }}/${{ env.PROJECT_NAME }}:${{ env.TAG_NAME }}
