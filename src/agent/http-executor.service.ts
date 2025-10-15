@@ -40,7 +40,7 @@ export class HttpExecutorService {
           response: null,
           responseStatus: 0,
           success: false,
-          error: error.message,
+          error: `Ошибка выполнения: ${error.message}`,
         });
         break;
       }
@@ -75,6 +75,7 @@ export class HttpExecutorService {
       response,
       responseStatus: status,
       success: status >= 200 && status < 300,
+      error: status >= 400 ? `HTTP ${status}: ${JSON.stringify(response)}` : undefined,
     };
   }
 
@@ -83,6 +84,9 @@ export class HttpExecutorService {
     previousResults: ExecutionResult[], 
     userPrompt: string
   ): Promise<{ parameters: ParameterValue[]; body: any }> {
+    
+    // Получаем актуальную схему из Swagger
+    const swaggerSchema = await this.getSwaggerSchemaForEndpoint(step);
     this.logger.log(`Generating parameters for step ${step.step}`);
 
     // Формируем описание предыдущих результатов
@@ -93,11 +97,10 @@ export class HttpExecutorService {
         ).join('\n\n')
       : '[нет предыдущих результатов]';
 
-    // Формируем детальное описание схемы body
-    this.logger.log(`Step parameters: ${JSON.stringify(step.parameters, null, 2)}`);
-    const bodySchema = step.parameters?.body?.schema;
-    this.logger.log(`Body schema: ${JSON.stringify(bodySchema, null, 2)}`);
-    const bodyDescription = bodySchema ? this.formatSchemaForPrompt(bodySchema) : 'Нет body';
+    // Формируем детальное описание схемы body из Swagger
+    const bodyDescription = swaggerSchema?.requestBody 
+      ? this.formatSwaggerRequestBody(swaggerSchema.requestBody)
+      : 'Нет body';
 
     const prompt = `Сгенерируй параметры и body для HTTP запроса.
 
@@ -105,9 +108,9 @@ export class HttpExecutorService {
 Описание: ${step.description}
 
 Схема параметров:
-Query: ${JSON.stringify(step.parameters?.query || [], null, 2)}
-Path: ${JSON.stringify(step.parameters?.path || [], null, 2)}
-Header: ${JSON.stringify(step.parameters?.header || [], null, 2)}
+Query: ${JSON.stringify(swaggerSchema?.parameters?.filter(p => p.in === 'query') || [], null, 2)}
+Path: ${JSON.stringify(swaggerSchema?.parameters?.filter(p => p.in === 'path') || [], null, 2)}
+Header: ${JSON.stringify(swaggerSchema?.parameters?.filter(p => p.in === 'header') || [], null, 2)}
 
 Схема Body (JSON):
 ${bodyDescription}
@@ -261,6 +264,96 @@ ${previousResultsText}
     // Если это $ref, который не был разрешен
     if (schema.$ref) {
       return `Ссылка на схему: ${schema.$ref}`;
+    }
+    
+    return JSON.stringify(schema, null, 2);
+  }
+
+  private async getSwaggerSchemaForEndpoint(step: ApiCallPlan): Promise<any> {
+    // Получаем swaggerUrl из API Registry
+    const swaggerUrl = await this.getSwaggerUrlForStep(step);
+    
+    if (!swaggerUrl) {
+      this.logger.warn(`No swagger URL found for step ${step.step}`);
+      return null;
+    }
+
+    try {
+      // Загружаем Swagger JSON
+      const response = await this.httpService.axiosRef.get(swaggerUrl);
+      const swaggerJson = response.data;
+      
+      // Ищем нужный endpoint
+      const paths = swaggerJson.paths || {};
+      const endpointPath = step.endpoint;
+      const method = step.method.toLowerCase();
+      
+      if (paths[endpointPath] && paths[endpointPath][method]) {
+        const operation = paths[endpointPath][method];
+        
+        // Извлекаем схему параметров
+        return {
+          parameters: operation.parameters || [],
+          requestBody: operation.requestBody,
+          summary: operation.summary,
+          description: operation.description
+        };
+      }
+      
+      this.logger.warn(`Endpoint ${method.toUpperCase()} ${endpointPath} not found in Swagger`);
+      return null;
+    } catch (error) {
+      this.logger.error(`Failed to load Swagger schema: ${error.message}`);
+      return null;
+    }
+  }
+
+  private async getSwaggerUrlForStep(step: ApiCallPlan): Promise<string | null> {
+    // Здесь нужно получить swaggerUrl из API Registry
+    // Пока возвращаем заглушку
+    return 'http://185.104.112.84:3000/api-docs';
+  }
+
+  private formatSwaggerRequestBody(requestBody: any): string {
+    if (!requestBody || !requestBody.content) {
+      return 'Нет body';
+    }
+
+    const jsonContent = requestBody.content['application/json'];
+    if (!jsonContent || !jsonContent.schema) {
+      return 'Нет body';
+    }
+
+    const schema = jsonContent.schema;
+    
+    // Если есть $ref, пытаемся его разрешить
+    if (schema.$ref) {
+      return `Ссылка на схему: ${schema.$ref}`;
+    }
+
+    // Если это объект с полями
+    if (schema.type === 'object' && schema.properties) {
+      const required = schema.required || [];
+      let description = 'Объект со следующими полями:\n';
+      
+      for (const [fieldName, fieldSchema] of Object.entries(schema.properties)) {
+        const isRequired = required.includes(fieldName);
+        const fieldInfo = fieldSchema as any;
+        
+        description += `- ${fieldName}${isRequired ? ' (ОБЯЗАТЕЛЬНО)' : ' (опционально)'}: ${fieldInfo.type || 'unknown'}`;
+        
+        if (fieldInfo.description) {
+          description += ` - ${fieldInfo.description}`;
+        }
+        
+        if (fieldInfo.example) {
+          description += ` (пример: ${fieldInfo.example})`;
+        }
+        
+        description += '\n';
+      }
+      
+      return description;
     }
     
     return JSON.stringify(schema, null, 2);

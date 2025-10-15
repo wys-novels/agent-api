@@ -21,6 +21,7 @@ export class AgentController {
     tasks: Array<{ command: string; prompt: string }>;
     apiPlan?: any;
     executionResults?: any;
+    finalResponse?: string;
   }> {
     this.logger.log(`Processing query: ${message}`);
 
@@ -67,6 +68,14 @@ export class AgentController {
       
       if (executionResults) {
         result.executionResults = executionResults;
+        
+        // Генерируем финальный ответ на основе результатов выполнения
+        try {
+          const finalResponse = await this.generateFinalResponse(executionResults, message);
+          result.finalResponse = finalResponse;
+        } catch (error) {
+          this.logger.warn('Failed to generate final response:', error);
+        }
       }
       
       return result;
@@ -74,6 +83,37 @@ export class AgentController {
       this.logger.error('Error processing query:', error);
       throw error;
     }
+  }
+
+  private async generateFinalResponse(executionResults: any[], originalMessage: string): Promise<string> {
+    // Находим GENERATE команду для финального ответа
+    const generateTask = await this.classifierService.classifyRequest(originalMessage);
+    const generateCommand = generateTask.tasks.find(task => task.command === 'GENERATE');
+    
+    if (!generateCommand) {
+      return 'Операция выполнена успешно.';
+    }
+
+    // Формируем контекст с результатами выполнения
+    const resultsContext = executionResults.map((result, index) => {
+      const status = result.success ? '✅ Успешно' : '❌ Ошибка';
+      return `Шаг ${result.step}: ${result.method} ${result.endpoint} - ${status}\n` +
+             `Запрос: ${JSON.stringify(result.requestBody || result.requestParameters, null, 2)}\n` +
+             `Ответ: ${JSON.stringify(result.response, null, 2)}\n`;
+    }).join('\n');
+
+    const prompt = `${generateCommand.prompt}
+
+Результаты выполнения API вызовов:
+${resultsContext}
+
+Сформируй понятный и структурированный ответ пользователю на основе полученных данных.`;
+
+    const response = await this.openaiService.generateAnswer({
+      messages: [{ role: 'user', content: prompt }],
+    });
+
+    return response.content;
   }
 
 }
