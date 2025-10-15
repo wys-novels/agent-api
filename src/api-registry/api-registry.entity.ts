@@ -1,4 +1,5 @@
-import { Entity, PrimaryGeneratedColumn, Column } from 'typeorm';
+import { Entity, PrimaryGeneratedColumn, Column, OneToMany } from 'typeorm';
+import { FeatureRegistry } from './feature-registry.entity';
 
 @Entity('api_registry')
 export class ApiRegistry {
@@ -6,8 +7,17 @@ export class ApiRegistry {
   id: string;
 
   @Column({ unique: true })
-  url: string;
+  swaggerUrl: string;
+
+  @Column()
+  baseUrl: string;
 
   @Column()
   name: string;
+
+  @Column({ nullable: true })
+  description: string;
+
+  @OneToMany(() => FeatureRegistry, feature => feature.apiRegistry, { cascade: true, onDelete: 'CASCADE' })
+  features: FeatureRegistry[];
 }

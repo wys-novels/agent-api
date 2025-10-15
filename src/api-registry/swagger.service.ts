@@ -1,0 +1,221 @@
+import { Injectable, Logger, BadRequestException } from '@nestjs/common';
+import { HttpService } from '@nestjs/axios';
+import { firstValueFrom } from 'rxjs';
+
+export interface SwaggerApiInfo {
+  name: string;
+  description?: string;
+  baseUrl: string;
+}
+
+export interface SwaggerFeature {
+  name: string;
+  description?: string;
+}
+
+export interface SwaggerEndpoint {
+  path: string;
+  method: string;
+  summary?: string;
+  description?: string;
+  operationId?: string;
+  featureName: string;
+  parameters?: any;
+}
+
+@Injectable()
+export class SwaggerService {
+  private readonly logger = new Logger(SwaggerService.name);
+
+  constructor(private readonly httpService: HttpService) {}
+
+  async validateSwaggerUrl(url: string): Promise<boolean> {
+    try {
+      this.logger.log(`Validating Swagger URL: ${url}`);
+      
+      const response = await firstValueFrom(
+        this.httpService.get(url, {
+          timeout: 10000,
+          headers: {
+            'Accept': 'application/json',
+          },
+        })
+      );
+
+      if (response.status !== 200) {
+        return false;
+      }
+
+      // Проверяем что это валидный JSON
+      const json = response.data;
+      if (!json || typeof json !== 'object') {
+        return false;
+      }
+
+      // Проверяем что это OpenAPI документ
+      if (!json.openapi && !json.swagger) {
+        return false;
+      }
+
+      return true;
+    } catch (error) {
+      this.logger.error(`Failed to validate Swagger URL: ${url}`, error);
+      return false;
+    }
+  }
+
+  async fetchSwaggerJson(url: string): Promise<any> {
+    this.logger.log(`Fetching Swagger JSON from: ${url}`);
+    
+    try {
+      const response = await firstValueFrom(
+        this.httpService.get(url, {
+          timeout: 10000,
+          headers: {
+            'Accept': 'application/json',
+          },
+        })
+      );
+
+      return response.data;
+    } catch (error) {
+      this.logger.error(`Failed to fetch Swagger JSON from: ${url}`, error);
+      throw new BadRequestException(`Failed to fetch Swagger documentation from: ${url}`);
+    }
+  }
+
+  extractBaseUrl(swaggerUrl: string): string {
+    try {
+      const url = new URL(swaggerUrl);
+      return `${url.protocol}//${url.host}`;
+    } catch (error) {
+      this.logger.warn(`Failed to extract base URL from: ${swaggerUrl}`);
+      return swaggerUrl;
+    }
+  }
+
+  extractApiInfo(json: any): SwaggerApiInfo {
+    const info = json.info || {};
+    
+    return {
+      name: info.title || 'Unknown API',
+      description: info.description || null,
+      baseUrl: '', // Будет заполнен отдельно
+    };
+  }
+
+  extractFeatures(json: any): SwaggerFeature[] {
+    const tags = json.tags || [];
+    
+    return tags.map((tag: any) => ({
+      name: tag.name || 'Unknown Feature',
+      description: tag.description || null,
+    }));
+  }
+
+  extractEndpoints(json: any): SwaggerEndpoint[] {
+    const paths = json.paths || {};
+    const endpoints: SwaggerEndpoint[] = [];
+
+    for (const [path, pathMethods] of Object.entries(paths)) {
+      const methods = pathMethods as any;
+      
+      for (const [method, operation] of Object.entries(methods)) {
+        if (typeof operation === 'object' && operation !== null) {
+          const op = operation as any;
+          
+          endpoints.push({
+            path,
+            method: method.toUpperCase(),
+            summary: op.summary || null,
+            description: op.description || null,
+            operationId: op.operationId || null,
+            featureName: op.tags?.[0] || 'Unknown Feature',
+            parameters: this.extractParameters(op),
+          });
+        }
+      }
+    }
+
+    return endpoints;
+  }
+
+  private extractParameters(operation: any): any {
+    const parameters = operation.parameters || [];
+    const requestBody = operation.requestBody;
+    
+    const extractedParams: any = {
+      query: [],
+      path: [],
+      header: [],
+      body: null,
+    };
+
+    // Обрабатываем параметры
+    for (const param of parameters) {
+      const paramInfo = {
+        name: param.name,
+        in: param.in,
+        required: param.required || false,
+        type: param.schema?.type || 'string',
+        description: param.description,
+        schema: param.schema,
+      };
+
+      switch (param.in) {
+        case 'query':
+          extractedParams.query.push(paramInfo);
+          break;
+        case 'path':
+          extractedParams.path.push(paramInfo);
+          break;
+        case 'header':
+          extractedParams.header.push(paramInfo);
+          break;
+      }
+    }
+
+    // Обрабатываем request body
+    if (requestBody) {
+      extractedParams.body = {
+        required: requestBody.required || false,
+        description: requestBody.description,
+        content: requestBody.content,
+      };
+    }
+
+    return extractedParams;
+  }
+
+  async parseSwaggerJson(swaggerUrl: string): Promise<{
+    apiInfo: SwaggerApiInfo;
+    features: SwaggerFeature[];
+    endpoints: SwaggerEndpoint[];
+  }> {
+    this.logger.log(`Parsing Swagger JSON from: ${swaggerUrl}`);
+
+    // Валидируем URL
+    const isValid = await this.validateSwaggerUrl(swaggerUrl);
+    if (!isValid) {
+      throw new BadRequestException(`Invalid Swagger URL: ${swaggerUrl}`);
+    }
+
+    // Получаем JSON
+    const json = await this.fetchSwaggerJson(swaggerUrl);
+
+    // Извлекаем данные
+    const apiInfo = this.extractApiInfo(json);
+    apiInfo.baseUrl = this.extractBaseUrl(swaggerUrl);
+
+    const features = this.extractFeatures(json);
+    const endpoints = this.extractEndpoints(json);
+
+    this.logger.log(`Parsed ${features.length} features and ${endpoints.length} endpoints`);
+
+    return {
+      apiInfo,
+      features,
+      endpoints,
+    };
+  }
+}

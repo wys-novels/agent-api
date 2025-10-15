@@ -11,7 +11,7 @@ export class ApiRegistryController {
 
   @Post()
   create(@Body() createApiRegistryDto: CreateApiRegistryDto) {
-    this.logger.log(`Creating API registry: ${createApiRegistryDto.url}`);
+    this.logger.log(`Creating API registry: ${createApiRegistryDto.swaggerUrl}`);
     return this.apiRegistryService.create(createApiRegistryDto);
   }
 
@@ -37,5 +37,17 @@ export class ApiRegistryController {
   remove(@Param('id') id: string) {
     this.logger.log(`Deleting API registry: ${id}`);
     return this.apiRegistryService.remove(id);
+  }
+
+  @Get(':id/features')
+  findFeatures(@Param('id') id: string) {
+    this.logger.log(`Getting features for API: ${id}`);
+    return this.apiRegistryService.findFeaturesByApiId(id);
+  }
+
+  @Get(':id/features/:featureId/endpoints')
+  findEndpoints(@Param('id') id: string, @Param('featureId') featureId: string) {
+    this.logger.log(`Getting endpoints for feature: ${featureId}`);
+    return this.apiRegistryService.findEndpointsByFeatureId(featureId);
   }
 }
