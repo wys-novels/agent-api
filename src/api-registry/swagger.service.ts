@@ -131,7 +131,7 @@ export class SwaggerService {
             description: op.description || null,
             operationId: op.operationId || null,
             featureName: op.tags?.[0] || 'Unknown Feature',
-            parameters: this.extractParameters(op),
+            parameters: this.extractParameters(op, json),
           });
         }
       }
@@ -140,7 +140,7 @@ export class SwaggerService {
     return endpoints;
   }
 
-  private extractParameters(operation: any): any {
+  private extractParameters(operation: any, swaggerJson?: any): any {
     const parameters = operation.parameters || [];
     const requestBody = operation.requestBody;
     
@@ -181,10 +181,56 @@ export class SwaggerService {
         required: requestBody.required || false,
         description: requestBody.description,
         content: requestBody.content,
+        schema: this.extractSchemaFromRequestBody(requestBody, swaggerJson),
       };
     }
 
     return extractedParams;
+  }
+
+  private extractSchemaFromRequestBody(requestBody: any, swaggerJson?: any): any {
+    if (!requestBody.content || !requestBody.content['application/json']) {
+      return null;
+    }
+
+    const content = requestBody.content['application/json'];
+    if (!content.schema) {
+      return null;
+    }
+
+    // Если есть $ref, нужно разрешить его
+    if (content.schema.$ref) {
+      return this.resolveSchemaRef(content.schema.$ref, swaggerJson);
+    }
+
+    return content.schema;
+  }
+
+  private resolveSchemaRef(ref: string, swaggerJson?: any): any {
+    this.logger.log(`Resolving schema ref: ${ref}`);
+    
+    // Убираем #/ из начала ref
+    const path = ref.replace('#/', '').split('/');
+    
+    if (!swaggerJson || path.length < 2) {
+      this.logger.warn(`Cannot resolve ref ${ref}: no swaggerJson or invalid path`);
+      return { $ref: ref };
+    }
+    
+    // Парсим путь типа components/schemas/CreateSleepGroupDto
+    if (path[0] === 'components' && path[1] === 'schemas' && path[2]) {
+      const schemaName = path[2];
+      const schema = swaggerJson.components?.schemas?.[schemaName];
+      if (schema) {
+        this.logger.log(`Resolved schema ${schemaName}: ${JSON.stringify(schema, null, 2)}`);
+        return schema;
+      } else {
+        this.logger.warn(`Schema ${schemaName} not found in components.schemas`);
+      }
+    }
+    
+    this.logger.warn(`Could not resolve ref ${ref}`);
+    return { $ref: ref };
   }
 
   async parseSwaggerJson(swaggerUrl: string): Promise<{

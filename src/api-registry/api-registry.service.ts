@@ -135,6 +135,9 @@ export class ApiRegistryService {
         for (const endpoint of endpoints) {
           const feature = featureMap.get(endpoint.featureName);
           if (feature) {
+            this.logger.log(`Creating endpoint: ${endpoint.path} ${endpoint.method}`);
+            this.logger.log(`Endpoint parameters: ${JSON.stringify(endpoint.parameters, null, 2)}`);
+            
             const endpointRegistry = manager.create(EndpointRegistry, {
               path: endpoint.path,
               method: endpoint.method,

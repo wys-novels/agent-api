@@ -1,12 +1,13 @@
 export interface ApiCallPlan {
   step: number;
+  endpointId: string;
   apiName: string;
   featureName: string;
   endpoint: string;
   method: string;
-  parameters?: ParameterValue[];
-  body?: any;
   description: string;
+  baseUrl: string; // baseUrl API
+  parameters: any; // полная схема параметров из Swagger
 }
 
 export interface ParameterValue {
@@ -17,6 +18,19 @@ export interface ParameterValue {
 
 export interface ApiPlannerResponse {
   plan: ApiCallPlan[];
+  parsingErrors?: string[];
+}
+
+export interface ExecutionResult {
+  step: number;
+  endpoint: string;
+  method: string;
+  requestParameters: ParameterValue[];
+  requestBody: any;
+  response: any;
+  responseStatus: number;
+  success: boolean;
+  error?: string;
 }
 
 export interface ApiWithFeatures {
@@ -47,11 +61,13 @@ export interface EndpointWithParams {
 }
 
 export interface EndpointPlan {
-  endpointId: string;
-  path: string;
-  method: string;
-  summary: string;
-  description: string;
-  parameters: any;
   step: number;
+  endpointId: string;
+  apiName: string;
+  featureName: string;
+  endpoint: string;
+  method: string;
+  description: string;
+  baseUrl: string;
+  parameters: any;
 }

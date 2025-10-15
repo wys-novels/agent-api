@@ -23,6 +23,8 @@ export class ApiPlannerService {
   async planApiCalls(prompt: string): Promise<ApiPlannerResponse> {
     this.logger.log(`Planning API calls for prompt: ${prompt}`);
 
+    const parsingErrors: string[] = [];
+
     try {
       // Этап 1: Выбор релевантных API
       const relevantApis = await this.selectRelevantApis(prompt);
@@ -33,13 +35,13 @@ export class ApiPlannerService {
       this.logger.log(`Selected ${relevantFeatures.length} features`);
 
       // Этап 3: Планирование последовательности эндпоинтов
-      const endpointSequence = await this.planEndpointSequence(prompt, relevantFeatures);
+      const endpointSequence = await this.planEndpointSequence(prompt, relevantFeatures, relevantApis);
       this.logger.log(`Planned ${endpointSequence.length} endpoint calls`);
 
-      // Этап 4: Извлечение параметров
-      const finalPlan = await this.extractParameters(prompt, endpointSequence);
-
-      return { plan: finalPlan };
+      return { 
+        plan: endpointSequence, 
+        ...(parsingErrors.length > 0 && { parsingErrors })
+      };
     } catch (error) {
       this.logger.error('Error planning API calls:', error);
       throw error;
@@ -140,7 +142,7 @@ ${featureDescriptions}
     return allFeatures.filter(feature => selectedFeatureIds.includes(feature.id));
   }
 
-  private async planEndpointSequence(userPrompt: string, features: FeatureWithEndpoints[]): Promise<EndpointPlan[]> {
+  private async planEndpointSequence(userPrompt: string, features: FeatureWithEndpoints[], apis: ApiWithFeatures[]): Promise<EndpointPlan[]> {
     this.logger.log('Stage 3: Planning endpoint sequence');
 
     const allEndpoints = features.flatMap(feature => 
@@ -182,14 +184,25 @@ ${endpointDescriptions}
     for (let i = 0; i < endpointIds.length; i++) {
       const endpoint = allEndpoints.find(e => e.id === endpointIds[i]);
       if (endpoint) {
+        // Находим baseUrl для этого endpoint
+        const api = apis.find(a => 
+          a.features.some(f => f.endpoints.some(e => e.id === endpoint.id))
+        );
+        const baseUrl = api ? api.baseUrl : 'https://api.example.com';
+
+        this.logger.log(`Adding endpoint to plan: ${endpoint.path} ${endpoint.method}`);
+        this.logger.log(`Endpoint parameters from DB: ${JSON.stringify(endpoint.parameters, null, 2)}`);
+        
         endpointSequence.push({
-          endpointId: endpoint.id,
-          path: endpoint.path,
-          method: endpoint.method,
-          summary: endpoint.summary,
-          description: endpoint.description,
-          parameters: endpoint.parameters,
           step: i + 1,
+          endpointId: endpoint.id,
+          apiName: endpoint.apiName,
+          featureName: endpoint.featureName,
+          endpoint: endpoint.path,
+          method: endpoint.method,
+          description: endpoint.description,
+          baseUrl: baseUrl,
+          parameters: endpoint.parameters,
         });
       }
     }
@@ -197,60 +210,4 @@ ${endpointDescriptions}
     return endpointSequence;
   }
 
-  private async extractParameters(userPrompt: string, endpoints: EndpointPlan[]): Promise<ApiCallPlan[]> {
-    this.logger.log('Stage 4: Extracting parameters');
-
-    const finalPlan: ApiCallPlan[] = [];
-
-    for (const endpoint of endpoints) {
-      const parameterPrompt = `Проанализируй эндпоинт и определи значения параметров.
-
-Эндпоинт: ${endpoint.method} ${endpoint.path}
-Описание: ${endpoint.description}
-Параметры: ${JSON.stringify(endpoint.parameters, null, 2)}
-
-Запрос пользователя: "${userPrompt}"
-
-Предыдущие шаги: ${endpoints.slice(0, endpoint.step - 1).map(e => `${e.step}. ${e.method} ${e.path}`).join(', ')}
-
-Верни JSON с параметрами в формате:
-{
-  "parameters": [
-    {"name": "param1", "value": "value1", "location": "query"},
-    {"name": "param2", "value": "{{response.step1.id}}", "location": "path"}
-  ],
-  "body": {"key": "value"} // если нужен body
-}
-
-Используй шаблоны типа {{response.step1.field}} для значений из предыдущих ответов:`;
-
-      const response = await this.openaiService.generateAnswer({
-        messages: [{ role: 'user', content: parameterPrompt }],
-      });
-
-      let parameters: ParameterValue[] = [];
-      let body: any = null;
-
-      try {
-        const parsed = JSON.parse(response.content);
-        parameters = parsed.parameters || [];
-        body = parsed.body;
-      } catch (error) {
-        this.logger.warn(`Failed to parse parameters for endpoint ${endpoint.path}: ${error.message}`);
-      }
-
-      finalPlan.push({
-        step: endpoint.step,
-        apiName: 'API', // TODO: получить из контекста
-        featureName: 'Feature', // TODO: получить из контекста
-        endpoint: endpoint.path,
-        method: endpoint.method,
-        parameters,
-        body,
-        description: endpoint.description,
-      });
-    }
-
-    return finalPlan;
-  }
 }
