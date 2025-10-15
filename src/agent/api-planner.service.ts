@@ -88,7 +88,7 @@ export class ApiPlannerService {
 
     // Формируем промпт для ИИ
     const apiDescriptions = apisWithFeatures.map(api => 
-      `API: ${api.name}\nDescription: ${api.description}\nBase URL: ${api.baseUrl}\nFeatures: ${api.features.map(f => f.name).join(', ')}`
+      `ID: ${api.id}\nAPI: ${api.name}\nDescription: ${api.description}\nBase URL: ${api.baseUrl}\nFeatures: ${api.features.map(f => f.name).join(', ')}`
     ).join('\n\n');
 
     const aiPrompt = `Проанализируй запрос пользователя и выбери релевантные API (1-3 API).
@@ -98,7 +98,7 @@ ${apiDescriptions}
 
 Запрос пользователя: "${userPrompt}"
 
-Верни только ID выбранных API через запятую (например: api1,api2,api3):`;
+Верни только ID выбранных API через запятую (используй точные ID из списка выше):`;
 
     const response = await this.openaiService.generateAnswer({
       messages: [{ role: 'user', content: aiPrompt }],
@@ -120,7 +120,7 @@ ${apiDescriptions}
     );
 
     const featureDescriptions = allFeatures.map(feature => 
-      `Feature: ${feature.name}\nAPI: ${feature.apiName}\nDescription: ${feature.description}\nEndpoints: ${feature.endpoints.map(e => `${e.method} ${e.path}`).join(', ')}`
+      `ID: ${feature.id}\nFeature: ${feature.name}\nAPI: ${feature.apiName}\nDescription: ${feature.description}\nEndpoints: ${feature.endpoints.map(e => `${e.method} ${e.path}`).join(', ')}`
     ).join('\n\n');
 
     const aiPrompt = `Проанализируй запрос пользователя и выбери релевантные фичи.
@@ -130,7 +130,7 @@ ${featureDescriptions}
 
 Запрос пользователя: "${userPrompt}"
 
-Верни только ID выбранных фичей через запятую:`;
+Верни только ID выбранных фичей через запятую (используй точные ID из списка выше):`;
 
     const response = await this.openaiService.generateAnswer({
       messages: [{ role: 'user', content: aiPrompt }],
@@ -152,7 +152,7 @@ ${featureDescriptions}
     );
 
     const endpointDescriptions = allEndpoints.map((endpoint, index) => 
-      `${index + 1}. ${endpoint.method} ${endpoint.path}\n   Feature: ${endpoint.featureName}\n   API: ${endpoint.apiName}\n   Summary: ${endpoint.summary}\n   Description: ${endpoint.description}`
+      `${index + 1}. ID: ${endpoint.id}\n   ${endpoint.method} ${endpoint.path}\n   Feature: ${endpoint.featureName}\n   API: ${endpoint.apiName}\n   Summary: ${endpoint.summary}\n   Description: ${endpoint.description}`
     ).join('\n\n');
 
     const aiPrompt = `Проанализируй запрос пользователя и создай последовательность вызовов эндпоинтов.
@@ -167,7 +167,7 @@ ${endpointDescriptions}
 2. endpoint_id_2
 3. endpoint_id_3
 
-Только номера и ID эндпоинтов, по одному на строку:`;
+Только номера и ID эндпоинтов, по одному на строку (используй точные ID из списка выше):`;
 
     const response = await this.openaiService.generateAnswer({
       messages: [{ role: 'user', content: aiPrompt }],
