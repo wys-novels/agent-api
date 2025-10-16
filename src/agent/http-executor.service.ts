@@ -1,7 +1,8 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { HttpService } from '@nestjs/axios';
 import { OpenAIService } from '../openai/openai.service';
-import { ApiCallPlan, ExecutionResult, ParameterValue } from './api-planner.interface';
+import { SwaggerService } from '../api-registry/swagger.service';
+import { ApiCallPlan, ExecutionResult, ParameterValue, ExecutionErrorType, StepContext, StandardizedError, ParameterValidationStatus, ParameterGenerationResult } from './api-planner.interface';
 import { firstValueFrom } from 'rxjs';
 
 @Injectable()
@@ -11,6 +12,7 @@ export class HttpExecutorService {
   constructor(
     private readonly httpService: HttpService,
     private readonly openaiService: OpenAIService,
+    private readonly swaggerService: SwaggerService,
   ) {}
 
   async executePlan(plan: ApiCallPlan[], userPrompt: string): Promise<ExecutionResult[]> {
@@ -31,6 +33,13 @@ export class HttpExecutorService {
         }
       } catch (error) {
         this.logger.error(`Error executing step ${step.step}:`, error);
+        const standardizedError = this.createStandardizedError(
+          ExecutionErrorType.UNKNOWN_ERROR,
+          `Ошибка выполнения: ${error.message}`,
+          { originalError: error },
+          step.step
+        );
+        
         results.push({
           step: step.step,
           endpoint: step.endpoint,
@@ -40,7 +49,9 @@ export class HttpExecutorService {
           response: null,
           responseStatus: 0,
           success: false,
-          error: `Ошибка выполнения: ${error.message}`,
+          error: standardizedError.message,
+          errorType: standardizedError.type,
+          errorDetails: standardizedError.details,
         });
         break;
       }
@@ -49,29 +60,101 @@ export class HttpExecutorService {
     return results;
   }
 
+  // Централизованная обработка ошибок
+  private createStandardizedError(
+    type: ExecutionErrorType,
+    message: string,
+    details?: any,
+    step?: number
+  ): StandardizedError {
+    return {
+      type,
+      message,
+      details,
+      step
+    };
+  }
+
+  // Форматирование контекста между шагами
+  private formatStepContext(previousResults: ExecutionResult[]): string {
+    if (previousResults.length === 0) {
+      return '[нет предыдущих результатов]';
+    }
+
+    return previousResults.map(result => {
+      const status = result.success ? 'Успех' : 'Ошибка';
+      const context: StepContext = {
+        step: result.step,
+        method: result.method,
+        endpoint: result.endpoint,
+        success: result.success,
+        response: result.response,
+        error: result.error
+      };
+
+      return `Шаг ${context.step}: ${context.method} ${context.endpoint} -> ${status}\n` +
+             `Ответ: ${JSON.stringify(context.response, null, 2)}`;
+    }).join('\n\n');
+  }
+
   private async executeStep(
     step: ApiCallPlan, 
     previousResults: ExecutionResult[], 
     userPrompt: string
   ): Promise<ExecutionResult> {
     // Генерируем параметры для этого шага
-    const { parameters, body } = await this.generateParametersForStep(step, previousResults, userPrompt);
+    const parameterResult = await this.generateParametersForStep(step, previousResults, userPrompt);
+
+    // Проверяем статус генерации параметров
+    if (parameterResult.status === ParameterValidationStatus.INSUFFICIENT_DATA) {
+      this.logger.warn(`Insufficient data for step ${step.step}: ${parameterResult.message}`);
+      return {
+        step: step.step,
+        endpoint: step.endpoint,
+        method: step.method,
+        requestParameters: [],
+        requestBody: null,
+        response: null,
+        responseStatus: 0,
+        success: false,
+        error: parameterResult.message,
+        errorType: ExecutionErrorType.INSUFFICIENT_DATA,
+        errorDetails: { message: parameterResult.message }
+      };
+    }
+
+    if (parameterResult.status === ParameterValidationStatus.ERROR) {
+      this.logger.error(`Parameter generation error for step ${step.step}: ${parameterResult.message}`);
+      return {
+        step: step.step,
+        endpoint: step.endpoint,
+        method: step.method,
+        requestParameters: [],
+        requestBody: null,
+        response: null,
+        responseStatus: 0,
+        success: false,
+        error: parameterResult.message,
+        errorType: ExecutionErrorType.PARAMETER_GENERATION_ERROR,
+        errorDetails: { message: parameterResult.message }
+      };
+    }
 
     // Выполняем HTTP запрос
     const { response, status } = await this.makeHttpRequest(
       step.baseUrl,
       step.endpoint,
       step.method,
-      parameters,
-      body
+      parameterResult.parameters,
+      parameterResult.body
     );
 
     return {
       step: step.step,
       endpoint: step.endpoint,
       method: step.method,
-      requestParameters: parameters,
-      requestBody: body,
+      requestParameters: parameterResult.parameters,
+      requestBody: parameterResult.body,
       response,
       responseStatus: status,
       success: status >= 200 && status < 300,
@@ -83,34 +166,50 @@ export class HttpExecutorService {
     step: ApiCallPlan, 
     previousResults: ExecutionResult[], 
     userPrompt: string
-  ): Promise<{ parameters: ParameterValue[]; body: any }> {
+  ): Promise<ParameterGenerationResult> {
     
-    // Получаем актуальную схему из Swagger
-    const swaggerSchema = await this.getSwaggerSchemaForEndpoint(step);
     this.logger.log(`Generating parameters for step ${step.step}`);
 
-    // Формируем описание предыдущих результатов
-    const previousResultsText = previousResults.length > 0 
-      ? previousResults.map(r => 
-          `Шаг ${r.step}: ${r.method} ${r.endpoint} -> ${r.success ? 'Успех' : 'Ошибка'}\n` +
-          `Ответ: ${JSON.stringify(r.response, null, 2)}`
-        ).join('\n\n')
-      : '[нет предыдущих результатов]';
+    try {
+      // Получаем схему из Swagger через SwaggerService
+      const swaggerUrl = await this.getSwaggerUrlForStep(step);
+      if (!swaggerUrl) {
+        throw this.createStandardizedError(
+          ExecutionErrorType.SWAGGER_ERROR,
+          `No swagger URL found for step ${step.step}`,
+          { step: step.step }
+        );
+      }
 
-    // Формируем детальное описание схемы body из Swagger
-    const bodyDescription = swaggerSchema?.requestBody 
-      ? this.formatSwaggerRequestBody(swaggerSchema.requestBody)
-      : 'Нет body';
+      const swaggerSchema = await this.swaggerService.getEndpointSchema(
+        swaggerUrl, 
+        step.endpoint, 
+        step.method
+      );
 
-    const prompt = `Сгенерируй параметры и body для HTTP запроса.
+      if (!swaggerSchema) {
+        throw this.createStandardizedError(
+          ExecutionErrorType.SWAGGER_ERROR,
+          `Endpoint ${step.method} ${step.endpoint} not found in Swagger`,
+          { step: step.step, endpoint: step.endpoint, method: step.method }
+        );
+      }
+
+      // Формируем контекст из предыдущих результатов
+      const previousResultsText = this.formatStepContext(previousResults);
+
+      // Формируем описание схемы body через SwaggerService
+      const bodyDescription = this.swaggerService.formatRequestBodySchema(swaggerSchema.requestBody);
+
+      const prompt = `Сгенерируй параметры и body для HTTP запроса.
 
 Эндпоинт: ${step.method} ${step.endpoint}
 Описание: ${step.description}
 
 Схема параметров:
-Query: ${JSON.stringify(swaggerSchema?.parameters?.filter(p => p.in === 'query') || [], null, 2)}
-Path: ${JSON.stringify(swaggerSchema?.parameters?.filter(p => p.in === 'path') || [], null, 2)}
-Header: ${JSON.stringify(swaggerSchema?.parameters?.filter(p => p.in === 'header') || [], null, 2)}
+Query: ${JSON.stringify(swaggerSchema.parameters?.filter(p => p.in === 'query') || [], null, 2)}
+Path: ${JSON.stringify(swaggerSchema.parameters?.filter(p => p.in === 'path') || [], null, 2)}
+Header: ${JSON.stringify(swaggerSchema.parameters?.filter(p => p.in === 'header') || [], null, 2)}
 
 Схема Body (JSON):
 ${bodyDescription}
@@ -121,33 +220,43 @@ ${bodyDescription}
 ${previousResultsText}
 
 ВАЖНО: 
-- Если в схеме body есть обязательные поля (required), ты ДОЛЖЕН их заполнить
+- Сначала определи, достаточно ли данных для выполнения запроса
+- Если в схеме есть обязательные поля (required), но в запросе пользователя их нет - используй статус INSUFFICIENT_DATA
+- Если данных достаточно - используй статус SUCCESS и заполни все параметры
 - Извлекай значения из запроса пользователя или используй разумные значения по умолчанию
 - Для timezone используй значения типа "Europe/Moscow", "UTC", "America/New_York"
 
 Верни ТОЛЬКО валидный JSON без markdown блоков:
+
+Если данных достаточно:
 {
+  "status": "SUCCESS",
   "parameters": [
     {"name": "param", "value": "value", "location": "query"}
   ],
   "body": {
     "key": "value"
   }
+}
+
+Если данных недостаточно:
+{
+  "status": "INSUFFICIENT_DATA",
+  "message": "Для выполнения запроса не хватает данных: [укажи что именно нужно]",
+  "parameters": [],
+  "body": {}
 }`;
 
-    this.logger.log(`Prompt for step ${step.step}: ${prompt.substring(0, 500)}...`);
+      this.logger.log(`Prompt for step ${step.step}: ${prompt.substring(0, 500)}...`);
 
-    const response = await this.openaiService.generateAnswer({
-      messages: [{ role: 'user', content: prompt }],
-    });
+      const response = await this.openaiService.generateAnswer({
+        messages: [{ role: 'user', content: prompt }],
+      });
 
-    this.logger.log(`AI Response for step ${step.step}: ${response.content}`);
+      this.logger.log(`AI Response for step ${step.step}: ${response.content}`);
 
-    try {
       // Извлекаем JSON из markdown блока если есть
       let jsonContent = response.content;
-      
-      // Убираем markdown блоки если есть
       const jsonMatch = jsonContent.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
       if (jsonMatch) {
         jsonContent = jsonMatch[1];
@@ -156,18 +265,34 @@ ${previousResultsText}
       const parsed = JSON.parse(jsonContent);
       this.logger.log(`Parsed parameters for step ${step.step}: ${JSON.stringify(parsed)}`);
       
+      // Проверяем статус ответа
+      const status = parsed.status as ParameterValidationStatus;
+      
+      if (status === ParameterValidationStatus.INSUFFICIENT_DATA) {
+        this.logger.warn(`Insufficient data for step ${step.step}: ${parsed.message}`);
+        return {
+          status: ParameterValidationStatus.INSUFFICIENT_DATA,
+          parameters: [],
+          body: null,
+          message: parsed.message
+        };
+      }
+      
       return {
+        status: status || ParameterValidationStatus.SUCCESS,
         parameters: parsed.parameters || [],
         body: parsed.body || null,
       };
+
     } catch (error) {
-      this.logger.error(`Failed to parse parameters for step ${step.step}: ${error.message}`);
-      this.logger.error(`Response: ${response.content}`);
+      this.logger.error(`Failed to generate parameters for step ${step.step}: ${error.message}`);
       
-      // Возвращаем пустые параметры в случае ошибки
+      // Возвращаем ошибку в случае парсинга
       return {
+        status: ParameterValidationStatus.ERROR,
         parameters: [],
         body: null,
+        message: `Ошибка парсинга ответа ИИ: ${error.message}`
       };
     }
   }
@@ -182,33 +307,14 @@ ${previousResultsText}
     this.logger.log(`Making HTTP ${method} request to ${baseUrl}${endpoint}`);
 
     try {
-      // Подготавливаем URL с query параметрами
-      let url = `${baseUrl}${endpoint}`;
-      const queryParams = parameters.filter(p => p.location === 'query');
-      if (queryParams.length > 0) {
-        const queryString = queryParams
-          .map(p => `${encodeURIComponent(p.name)}=${encodeURIComponent(String(p.value))}`)
-          .join('&');
-        url += `?${queryString}`;
-      }
-
-      // Подготавливаем headers
-      const headers: any = {};
-      parameters.filter(p => p.location === 'header').forEach(p => {
-        headers[p.name] = String(p.value);
-      });
-
-      // Подготавливаем path параметры
-      let finalUrl = url;
-      parameters.filter(p => p.location === 'path').forEach(p => {
-        finalUrl = finalUrl.replace(`{${p.name}}`, String(p.value));
-      });
+      const requestBuilder = new HttpRequestBuilder(baseUrl, endpoint, method);
+      const { url, headers } = requestBuilder.buildRequest(parameters, body);
 
       // Выполняем запрос
       const response = await firstValueFrom(
         this.httpService.request({
           method: method.toLowerCase() as any,
-          url: finalUrl,
+          url,
           headers,
           data: body,
         })
@@ -233,130 +339,52 @@ ${previousResultsText}
     }
   }
 
-  private formatSchemaForPrompt(schema: any): string {
-    if (!schema) return 'Нет схемы';
-    
-    // Если это разрешенная схема из $ref
-    if (schema.type === 'object' && schema.properties) {
-      const required = schema.required || [];
-      let description = 'Объект со следующими полями:\n';
-      
-      for (const [fieldName, fieldSchema] of Object.entries(schema.properties)) {
-        const isRequired = required.includes(fieldName);
-        const fieldInfo = fieldSchema as any;
-        
-        description += `- ${fieldName}${isRequired ? ' (ОБЯЗАТЕЛЬНО)' : ' (опционально)'}: ${fieldInfo.type || 'unknown'}`;
-        
-        if (fieldInfo.description) {
-          description += ` - ${fieldInfo.description}`;
-        }
-        
-        if (fieldInfo.example) {
-          description += ` (пример: ${fieldInfo.example})`;
-        }
-        
-        description += '\n';
-      }
-      
-      return description;
-    }
-    
-    // Если это $ref, который не был разрешен
-    if (schema.$ref) {
-      return `Ссылка на схему: ${schema.$ref}`;
-    }
-    
-    return JSON.stringify(schema, null, 2);
-  }
-
-  private async getSwaggerSchemaForEndpoint(step: ApiCallPlan): Promise<any> {
-    // Получаем swaggerUrl из API Registry
-    const swaggerUrl = await this.getSwaggerUrlForStep(step);
-    
-    if (!swaggerUrl) {
-      this.logger.warn(`No swagger URL found for step ${step.step}`);
-      return null;
-    }
-
-    try {
-      // Загружаем Swagger JSON
-      const response = await this.httpService.axiosRef.get(swaggerUrl);
-      const swaggerJson = response.data;
-      
-      // Ищем нужный endpoint
-      const paths = swaggerJson.paths || {};
-      const endpointPath = step.endpoint;
-      const method = step.method.toLowerCase();
-      
-      if (paths[endpointPath] && paths[endpointPath][method]) {
-        const operation = paths[endpointPath][method];
-        
-        // Извлекаем схему параметров
-        return {
-          parameters: operation.parameters || [],
-          requestBody: operation.requestBody,
-          summary: operation.summary,
-          description: operation.description
-        };
-      }
-      
-      this.logger.warn(`Endpoint ${method.toUpperCase()} ${endpointPath} not found in Swagger`);
-      return null;
-    } catch (error) {
-      this.logger.error(`Failed to load Swagger schema: ${error.message}`);
-      return null;
-    }
-  }
-
   private async getSwaggerUrlForStep(step: ApiCallPlan): Promise<string | null> {
-    // Здесь нужно получить swaggerUrl из API Registry
-    // Пока возвращаем заглушку
-    return 'http://185.104.112.84:3000/api-docs';
-  }
-
-  private formatSwaggerRequestBody(requestBody: any): string {
-    if (!requestBody || !requestBody.content) {
-      return 'Нет body';
-    }
-
-    const jsonContent = requestBody.content['application/json'];
-    if (!jsonContent || !jsonContent.schema) {
-      return 'Нет body';
-    }
-
-    const schema = jsonContent.schema;
-    
-    // Если есть $ref, пытаемся его разрешить
-    if (schema.$ref) {
-      return `Ссылка на схему: ${schema.$ref}`;
-    }
-
-    // Если это объект с полями
-    if (schema.type === 'object' && schema.properties) {
-      const required = schema.required || [];
-      let description = 'Объект со следующими полями:\n';
-      
-      for (const [fieldName, fieldSchema] of Object.entries(schema.properties)) {
-        const isRequired = required.includes(fieldName);
-        const fieldInfo = fieldSchema as any;
-        
-        description += `- ${fieldName}${isRequired ? ' (ОБЯЗАТЕЛЬНО)' : ' (опционально)'}: ${fieldInfo.type || 'unknown'}`;
-        
-        if (fieldInfo.description) {
-          description += ` - ${fieldInfo.description}`;
-        }
-        
-        if (fieldInfo.example) {
-          description += ` (пример: ${fieldInfo.example})`;
-        }
-        
-        description += '\n';
-      }
-      
-      return description;
+    if (!step.swaggerUrl) {
+      this.logger.warn(`No swagger URL provided for step ${step.step}`);
+      return null;
     }
     
-    return JSON.stringify(schema, null, 2);
+    this.logger.log(`Using swagger URL for step ${step.step}: ${step.swaggerUrl}`);
+    return step.swaggerUrl;
   }
 
+}
+
+// Вспомогательный класс для построения HTTP запросов
+class HttpRequestBuilder {
+  constructor(
+    private baseUrl: string,
+    private endpoint: string,
+    private method: string
+  ) {}
+
+  buildRequest(parameters: ParameterValue[], body: any): { url: string; headers: any } {
+    // Подготавливаем URL с query параметрами
+    let url = `${this.baseUrl}${this.endpoint}`;
+    const queryParams = parameters.filter(p => p.location === 'query');
+    if (queryParams.length > 0) {
+      const queryString = queryParams
+        .map(p => `${encodeURIComponent(p.name)}=${encodeURIComponent(String(p.value))}`)
+        .join('&');
+      url += `?${queryString}`;
+    }
+
+    // Подготавливаем headers
+    const headers: any = {};
+    parameters.filter(p => p.location === 'header').forEach(p => {
+      headers[p.name] = String(p.value);
+    });
+
+    // Подготавливаем path параметры
+    let finalUrl = url;
+    parameters.filter(p => p.location === 'path').forEach(p => {
+      finalUrl = finalUrl.replace(`{${p.name}}`, String(p.value));
+    });
+
+    return {
+      url: finalUrl,
+      headers
+    };
+  }
 }

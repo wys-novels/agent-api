@@ -26,6 +26,7 @@ export interface SwaggerEndpoint {
 @Injectable()
 export class SwaggerService {
   private readonly logger = new Logger(SwaggerService.name);
+  private readonly swaggerCache = new Map<string, any>();
 
   constructor(private readonly httpService: HttpService) {}
 
@@ -65,6 +66,12 @@ export class SwaggerService {
   }
 
   async fetchSwaggerJson(url: string): Promise<any> {
+    // Проверяем кэш
+    if (this.swaggerCache.has(url)) {
+      this.logger.log(`Using cached Swagger JSON for: ${url}`);
+      return this.swaggerCache.get(url);
+    }
+
     this.logger.log(`Fetching Swagger JSON from: ${url}`);
     
     try {
@@ -77,6 +84,8 @@ export class SwaggerService {
         })
       );
 
+      // Кэшируем результат
+      this.swaggerCache.set(url, response.data);
       return response.data;
     } catch (error) {
       this.logger.error(`Failed to fetch Swagger JSON from: ${url}`, error);
@@ -263,5 +272,70 @@ export class SwaggerService {
       features,
       endpoints,
     };
+  }
+
+  // Метод для получения схемы конкретного эндпоинта
+  async getEndpointSchema(swaggerUrl: string, endpointPath: string, method: string): Promise<any> {
+    const swaggerJson = await this.fetchSwaggerJson(swaggerUrl);
+    const paths = swaggerJson.paths || {};
+    const methodLower = method.toLowerCase();
+    
+    if (paths[endpointPath] && paths[endpointPath][methodLower]) {
+      const operation = paths[endpointPath][methodLower];
+      return {
+        parameters: operation.parameters || [],
+        requestBody: operation.requestBody,
+        summary: operation.summary,
+        description: operation.description
+      };
+    }
+    
+    return null;
+  }
+
+  // Метод для форматирования схемы body для промпта
+  formatRequestBodySchema(requestBody: any): string {
+    if (!requestBody || !requestBody.content) {
+      return 'Нет body';
+    }
+
+    const jsonContent = requestBody.content['application/json'];
+    if (!jsonContent || !jsonContent.schema) {
+      return 'Нет body';
+    }
+
+    const schema = jsonContent.schema;
+    
+    // Если есть $ref, пытаемся его разрешить
+    if (schema.$ref) {
+      return `Ссылка на схему: ${schema.$ref}`;
+    }
+
+    // Если это объект с полями
+    if (schema.type === 'object' && schema.properties) {
+      const required = schema.required || [];
+      let description = 'Объект со следующими полями:\n';
+      
+      for (const [fieldName, fieldSchema] of Object.entries(schema.properties)) {
+        const isRequired = required.includes(fieldName);
+        const fieldInfo = fieldSchema as any;
+        
+        description += `- ${fieldName}${isRequired ? ' (ОБЯЗАТЕЛЬНО)' : ' (опционально)'}: ${fieldInfo.type || 'unknown'}`;
+        
+        if (fieldInfo.description) {
+          description += ` - ${fieldInfo.description}`;
+        }
+        
+        if (fieldInfo.example) {
+          description += ` (пример: ${fieldInfo.example})`;
+        }
+        
+        description += '\n';
+      }
+      
+      return description;
+    }
+    
+    return JSON.stringify(schema, null, 2);
   }
 }

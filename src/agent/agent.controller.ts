@@ -3,6 +3,7 @@ import { OpenAIService } from '../openai/openai.service';
 import { ClassifierService } from '../classifier/classifier.service';
 import { ApiPlannerService } from './api-planner.service';
 import { HttpExecutorService } from './http-executor.service';
+import { ReasoningService } from './reasoning.service';
 import { Command } from '../classifier/classifier.enum';
 
 @Controller('agent')
@@ -14,6 +15,7 @@ export class AgentController {
     private readonly classifierService: ClassifierService,
     private readonly apiPlannerService: ApiPlannerService,
     private readonly httpExecutorService: HttpExecutorService,
+    private readonly reasoningService: ReasoningService,
   ) {}
 
   @Get('query')
@@ -22,6 +24,8 @@ export class AgentController {
     apiPlan?: any;
     executionResults?: any;
     finalResponse?: string;
+    reasoning?: any;
+    needsClarification?: boolean;
   }> {
     this.logger.log(`Processing query: ${message}`);
 
@@ -30,7 +34,32 @@ export class AgentController {
     }
 
     try {
-      const classification = await this.classifierService.classifyRequest(message);
+      // 1. Анализ намерения через ReasoningService
+      this.logger.log('Starting reasoning analysis...');
+      const reasoningResult = await this.reasoningService.analyze(message);
+      
+      this.logger.log(`Reasoning analysis completed. Should proceed: ${reasoningResult.shouldProceed}`);
+      this.logger.log(`Interpreted intent: ${reasoningResult.analysis.interpretedIntent}`);
+      this.logger.log(`Confidence: ${reasoningResult.analysis.confidence}`);
+      
+      if (!reasoningResult.shouldProceed) {
+        this.logger.log('Request requires clarification, stopping execution');
+        return {
+          tasks: [],
+          needsClarification: true,
+          finalResponse: reasoningResult.recommendations.join('\n'),
+          reasoning: {
+            analysis: reasoningResult.analysis,
+            recommendations: reasoningResult.recommendations
+          }
+        };
+      }
+
+      // 2. Используем обогащенный запрос для классификации
+      const enrichedMessage = reasoningResult.enrichedRequest;
+      this.logger.log(`Using enriched request: ${enrichedMessage}`);
+      
+      const classification = await this.classifierService.classifyRequest(enrichedMessage);
       
       // Проверяем, есть ли HTTP_TOOL команды
       const hasHttpTool = classification.tasks.some(task => task.command === 'HTTP_TOOL');
@@ -60,6 +89,10 @@ export class AgentController {
       
       const result: any = {
         tasks: classification.tasks,
+        reasoning: {
+          analysis: reasoningResult.analysis,
+          recommendations: reasoningResult.recommendations
+        }
       };
       
       if (apiPlan) {
@@ -71,7 +104,7 @@ export class AgentController {
         
         // Генерируем финальный ответ на основе результатов выполнения
         try {
-          const finalResponse = await this.generateFinalResponse(executionResults, message);
+          const finalResponse = await this.generateFinalResponse(executionResults, enrichedMessage);
           result.finalResponse = finalResponse;
         } catch (error) {
           this.logger.warn('Failed to generate final response:', error);
@@ -94,7 +127,33 @@ export class AgentController {
       return 'Операция выполнена успешно.';
     }
 
-    // Формируем контекст с результатами выполнения
+    // Проверяем, есть ли ошибки недостатка данных
+    const insufficientDataResults = executionResults.filter(result => 
+      result.errorType === 'INSUFFICIENT_DATA'
+    );
+
+    if (insufficientDataResults.length > 0) {
+      // Формируем специальный контекст для случая недостатка данных
+      const insufficientDataContext = insufficientDataResults.map(result => 
+        `Шаг ${result.step}: ${result.method} ${result.endpoint} - ❌ Недостаточно данных\n` +
+        `Причина: ${result.error}\n`
+      ).join('\n');
+
+      const prompt = `Пользователь запросил: "${originalMessage}"
+
+Для выполнения запроса не хватает данных:
+${insufficientDataContext}
+
+Попроси пользователя уточнить недостающую информацию и объясни, что именно нужно для выполнения запроса.`;
+
+      const response = await this.openaiService.generateAnswer({
+        messages: [{ role: 'user', content: prompt }],
+      });
+
+      return response.content;
+    }
+
+    // Формируем обычный контекст с результатами выполнения
     const resultsContext = executionResults.map((result, index) => {
       const status = result.success ? '✅ Успешно' : '❌ Ошибка';
       return `Шаг ${result.step}: ${result.method} ${result.endpoint} - ${status}\n` +

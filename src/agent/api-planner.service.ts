@@ -68,7 +68,6 @@ export class ApiPlannerService {
           summary: endpoint.summary,
           description: endpoint.description,
           operationId: endpoint.operationId,
-          parameters: (endpoint as any).parameters || null,
         }));
 
         featuresWithEndpoints.push({
@@ -84,6 +83,7 @@ export class ApiPlannerService {
         name: api.name,
         description: api.description,
         baseUrl: api.baseUrl,
+        swaggerUrl: api.swaggerUrl,
         features: featuresWithEndpoints,
       });
     }
@@ -184,14 +184,14 @@ ${endpointDescriptions}
     for (let i = 0; i < endpointIds.length; i++) {
       const endpoint = allEndpoints.find(e => e.id === endpointIds[i]);
       if (endpoint) {
-        // Находим baseUrl для этого endpoint
+        // Находим API для этого endpoint
         const api = apis.find(a => 
           a.features.some(f => f.endpoints.some(e => e.id === endpoint.id))
         );
         const baseUrl = api ? api.baseUrl : 'https://api.example.com';
+        const swaggerUrl = api ? api.swaggerUrl : null;
 
         this.logger.log(`Adding endpoint to plan: ${endpoint.path} ${endpoint.method}`);
-        this.logger.log(`Endpoint parameters from DB: ${JSON.stringify(endpoint.parameters, null, 2)}`);
         
         endpointSequence.push({
           step: i + 1,
@@ -202,12 +202,13 @@ ${endpointDescriptions}
           method: endpoint.method,
           description: endpoint.description,
           baseUrl: baseUrl,
-          parameters: endpoint.parameters,
+          swaggerUrl: swaggerUrl || '',
         });
       }
     }
 
     return endpointSequence;
   }
+
 
 }

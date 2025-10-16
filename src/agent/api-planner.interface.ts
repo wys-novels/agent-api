@@ -7,7 +7,7 @@ export interface ApiCallPlan {
   method: string;
   description: string;
   baseUrl: string; // baseUrl API
-  parameters: any; // полная схема параметров из Swagger
+  swaggerUrl: string; // URL для загрузки Swagger схемы
 }
 
 export interface ParameterValue {
@@ -31,6 +31,8 @@ export interface ExecutionResult {
   responseStatus: number;
   success: boolean;
   error?: string;
+  errorType?: ExecutionErrorType;
+  errorDetails?: any;
 }
 
 export interface ApiWithFeatures {
@@ -38,6 +40,7 @@ export interface ApiWithFeatures {
   name: string;
   description: string;
   baseUrl: string;
+  swaggerUrl: string;
   features: FeatureWithEndpoints[];
 }
 
@@ -57,7 +60,6 @@ export interface EndpointWithParams {
   summary: string;
   description: string;
   operationId: string;
-  parameters: any;
 }
 
 export interface EndpointPlan {
@@ -69,5 +71,43 @@ export interface EndpointPlan {
   method: string;
   description: string;
   baseUrl: string;
-  parameters: any;
+  swaggerUrl: string;
+}
+
+export enum ExecutionErrorType {
+  SWAGGER_ERROR = 'SWAGGER_ERROR',
+  PARAMETER_GENERATION_ERROR = 'PARAMETER_GENERATION_ERROR',
+  HTTP_REQUEST_ERROR = 'HTTP_REQUEST_ERROR',
+  VALIDATION_ERROR = 'VALIDATION_ERROR',
+  INSUFFICIENT_DATA = 'INSUFFICIENT_DATA',
+  UNKNOWN_ERROR = 'UNKNOWN_ERROR'
+}
+
+export enum ParameterValidationStatus {
+  SUCCESS = 'SUCCESS',
+  INSUFFICIENT_DATA = 'INSUFFICIENT_DATA',
+  ERROR = 'ERROR'
+}
+
+export interface StepContext {
+  step: number;
+  method: string;
+  endpoint: string;
+  success: boolean;
+  response?: any;
+  error?: string;
+}
+
+export interface StandardizedError {
+  type: ExecutionErrorType;
+  message: string;
+  details?: any;
+  step?: number;
+}
+
+export interface ParameterGenerationResult {
+  status: ParameterValidationStatus;
+  parameters: ParameterValue[];
+  body: any;
+  message?: string;
 }
