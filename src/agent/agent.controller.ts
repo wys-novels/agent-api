@@ -3,7 +3,6 @@ import { OpenAIService } from '../openai/openai.service';
 import { ClassifierService } from '../classifier/classifier.service';
 import { ApiPlannerService } from './api-planner.service';
 import { HttpExecutorService } from './http-executor.service';
-import { ReasoningService } from './reasoning.service';
 import { Command } from '../classifier/classifier.enum';
 
 @Controller('agent')
@@ -15,7 +14,6 @@ export class AgentController {
     private readonly classifierService: ClassifierService,
     private readonly apiPlannerService: ApiPlannerService,
     private readonly httpExecutorService: HttpExecutorService,
-    private readonly reasoningService: ReasoningService,
   ) {}
 
   @Get('query')
@@ -24,8 +22,6 @@ export class AgentController {
     apiPlan?: any;
     executionResults?: any;
     finalResponse?: string;
-    reasoning?: any;
-    needsClarification?: boolean;
   }> {
     this.logger.log(`Processing query: ${message}`);
 
@@ -34,32 +30,10 @@ export class AgentController {
     }
 
     try {
-      // 1. Анализ намерения через ReasoningService
-      this.logger.log('Starting reasoning analysis...');
-      const reasoningResult = await this.reasoningService.analyze(message);
+      // 1. Прямая классификация запроса без reasoning анализа
+      this.logger.log('Classifying request directly...');
       
-      this.logger.log(`Reasoning analysis completed. Should proceed: ${reasoningResult.shouldProceed}`);
-      this.logger.log(`Interpreted intent: ${reasoningResult.analysis.interpretedIntent}`);
-      this.logger.log(`Confidence: ${reasoningResult.analysis.confidence}`);
-      
-      if (!reasoningResult.shouldProceed) {
-        this.logger.log('Request requires clarification, stopping execution');
-        return {
-          tasks: [],
-          needsClarification: true,
-          finalResponse: reasoningResult.recommendations.join('\n'),
-          reasoning: {
-            analysis: reasoningResult.analysis,
-            recommendations: reasoningResult.recommendations
-          }
-        };
-      }
-
-      // 2. Используем обогащенный запрос для классификации
-      const enrichedMessage = reasoningResult.enrichedRequest;
-      this.logger.log(`Using enriched request: ${enrichedMessage}`);
-      
-      const classification = await this.classifierService.classifyRequest(enrichedMessage);
+      const classification = await this.classifierService.classifyRequest(message);
       
       // Проверяем, есть ли HTTP_TOOL команды
       const hasHttpTool = classification.tasks.some(task => task.command === 'HTTP_TOOL');
@@ -70,10 +44,14 @@ export class AgentController {
       if (hasHttpTool) {
         try {
           this.logger.log('Generating API plan for HTTP_TOOL commands');
-          // Используем промпт из HTTP_TOOL команды для построения плана
-          const httpToolTask = classification.tasks.find(task => task.command === 'HTTP_TOOL');
-          const planPrompt = httpToolTask ? httpToolTask.prompt : message;
+          // Собираем все HTTP_TOOL задачи для планировщика
+          const httpToolTasks = classification.tasks.filter(task => task.command === 'HTTP_TOOL');
+          const planPrompt = httpToolTasks.length > 0 
+            ? httpToolTasks.map(task => task.prompt).join('\n\n')
+            : message;
           
+          this.logger.log(`Planning for ${httpToolTasks.length} HTTP_TOOL tasks`);
+          this.logger.log(`HTTP_TOOL tasks: ${httpToolTasks.map(task => task.prompt).join(' | ')}`);
           apiPlan = await this.apiPlannerService.planApiCalls(planPrompt);
           
           // Выполняем план
@@ -88,11 +66,7 @@ export class AgentController {
       }
       
       const result: any = {
-        tasks: classification.tasks,
-        reasoning: {
-          analysis: reasoningResult.analysis,
-          recommendations: reasoningResult.recommendations
-        }
+        tasks: classification.tasks
       };
       
       if (apiPlan) {
@@ -104,7 +78,7 @@ export class AgentController {
         
         // Генерируем финальный ответ на основе результатов выполнения
         try {
-          const finalResponse = await this.generateFinalResponse(executionResults, enrichedMessage);
+          const finalResponse = await this.generateFinalResponse(executionResults, message);
           result.finalResponse = finalResponse;
         } catch (error) {
           this.logger.warn('Failed to generate final response:', error);

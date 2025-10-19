@@ -22,6 +22,7 @@ export class ApiPlannerService {
 
   async planApiCalls(prompt: string): Promise<ApiPlannerResponse> {
     this.logger.log(`Planning API calls for prompt: ${prompt}`);
+    this.logger.log(`Full prompt length: ${prompt.length} characters`);
 
     const parsingErrors: string[] = [];
 
@@ -163,6 +164,11 @@ ${featureDescriptions}
 ${endpointDescriptions}
 
 Запрос пользователя: "${userPrompt}"
+
+ВАЖНО:
+- Если в запросе есть несколько задач (например, "получить данные" И "обновить данные"), создай последовательность для ВСЕХ задач
+- Учитывай логическую последовательность: сначала GET для получения данных, потом PUT/POST для обновления
+- Если нужно обновить данные на основе полученных, сначала получи данные, потом обнови
 
 Верни последовательность в формате:
 1. endpoint_id_1

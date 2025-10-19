@@ -219,12 +219,19 @@ ${bodyDescription}
 Предыдущие результаты:
 ${previousResultsText}
 
-ВАЖНО: 
+КРИТИЧЕСКИ ВАЖНО: 
+- ВНИМАТЕЛЬНО изучи endpoint: ${step.endpoint}
+- Если в endpoint есть {параметр} (например, {id}, {userId}), то ОБЯЗАТЕЛЬНО создай параметр с location: "path"
+- Path параметры ОБЯЗАТЕЛЬНЫ для замены {параметр} в URL
 - Сначала определи, достаточно ли данных для выполнения запроса
 - Если в схеме есть обязательные поля (required), но в запросе пользователя их нет - используй статус INSUFFICIENT_DATA
 - Если данных достаточно - используй статус SUCCESS и заполни все параметры
 - Извлекай значения из запроса пользователя или используй разумные значения по умолчанию
 - Для timezone используй значения типа "Europe/Moscow", "UTC", "America/New_York"
+
+Примеры path параметров:
+- Если endpoint: "/users/{id}/profile" -> создай параметр {"name": "id", "value": "123", "location": "path"}
+- Если endpoint: "/sleep-groups/{id}/sleeps" -> создай параметр {"name": "id", "value": "456", "location": "path"}
 
 Верни ТОЛЬКО валидный JSON без markdown блоков:
 
@@ -232,7 +239,8 @@ ${previousResultsText}
 {
   "status": "SUCCESS",
   "parameters": [
-    {"name": "param", "value": "value", "location": "query"}
+    {"name": "param", "value": "value", "location": "query"},
+    {"name": "id", "value": "123", "location": "path"}
   ],
   "body": {
     "key": "value"
@@ -264,6 +272,14 @@ ${previousResultsText}
       
       const parsed = JSON.parse(jsonContent);
       this.logger.log(`Parsed parameters for step ${step.step}: ${JSON.stringify(parsed)}`);
+      
+      // Дополнительное логирование для path параметров
+      const pathParams = parsed.parameters?.filter((p: any) => p.location === 'path') || [];
+      if (pathParams.length > 0) {
+        this.logger.log(`Generated path parameters for step ${step.step}:`, pathParams);
+      } else {
+        this.logger.warn(`No path parameters generated for step ${step.step} with endpoint: ${step.endpoint}`);
+      }
       
       // Проверяем статус ответа
       const status = parsed.status as ParameterValidationStatus;
@@ -306,6 +322,15 @@ ${previousResultsText}
   ): Promise<{ response: any; status: number }> {
     this.logger.log(`Making HTTP ${method} request to ${baseUrl}${endpoint}`);
 
+    // Валидация path параметров
+    const pathParams = parameters.filter(p => p.location === 'path');
+    const missingPathParams = this.validatePathParameters(endpoint, pathParams);
+    
+    if (missingPathParams.length > 0) {
+      this.logger.error(`Missing path parameters: ${missingPathParams.join(', ')}`);
+      throw new Error(`Missing required path parameters: ${missingPathParams.join(', ')}`);
+    }
+
     try {
       const requestBuilder = new HttpRequestBuilder(baseUrl, endpoint, method);
       const { url, headers } = requestBuilder.buildRequest(parameters, body);
@@ -339,6 +364,29 @@ ${previousResultsText}
     }
   }
 
+  private validatePathParameters(endpoint: string, pathParams: ParameterValue[]): string[] {
+    const missingParams: string[] = [];
+    
+    // Находим все {параметр} в endpoint
+    const pathParamMatches = endpoint.match(/\{([^}]+)\}/g);
+    if (!pathParamMatches) {
+      return missingParams; // Нет path параметров
+    }
+    
+    // Извлекаем имена параметров
+    const requiredParams = pathParamMatches.map(match => match.slice(1, -1)); // убираем { и }
+    
+    // Проверяем, есть ли все необходимые параметры
+    for (const requiredParam of requiredParams) {
+      const hasParam = pathParams.some(param => param.name === requiredParam);
+      if (!hasParam) {
+        missingParams.push(requiredParam);
+      }
+    }
+    
+    return missingParams;
+  }
+
   private async getSwaggerUrlForStep(step: ApiCallPlan): Promise<string | null> {
     if (!step.swaggerUrl) {
       this.logger.warn(`No swagger URL provided for step ${step.step}`);
@@ -360,14 +408,20 @@ class HttpRequestBuilder {
   ) {}
 
   buildRequest(parameters: ParameterValue[], body: any): { url: string; headers: any } {
+    console.log(`[HttpRequestBuilder] Building request for endpoint: ${this.endpoint}`);
+    console.log(`[HttpRequestBuilder] Parameters received:`, JSON.stringify(parameters, null, 2));
+    
     // Подготавливаем URL с query параметрами
     let url = `${this.baseUrl}${this.endpoint}`;
+    console.log(`[HttpRequestBuilder] Initial URL: ${url}`);
+    
     const queryParams = parameters.filter(p => p.location === 'query');
     if (queryParams.length > 0) {
       const queryString = queryParams
         .map(p => `${encodeURIComponent(p.name)}=${encodeURIComponent(String(p.value))}`)
         .join('&');
       url += `?${queryString}`;
+      console.log(`[HttpRequestBuilder] URL with query params: ${url}`);
     }
 
     // Подготавливаем headers
@@ -378,9 +432,18 @@ class HttpRequestBuilder {
 
     // Подготавливаем path параметры
     let finalUrl = url;
-    parameters.filter(p => p.location === 'path').forEach(p => {
-      finalUrl = finalUrl.replace(`{${p.name}}`, String(p.value));
+    const pathParams = parameters.filter(p => p.location === 'path');
+    console.log(`[HttpRequestBuilder] Path parameters:`, pathParams);
+    
+    pathParams.forEach(p => {
+      const placeholder = `{${p.name}}`;
+      const value = String(p.value);
+      console.log(`[HttpRequestBuilder] Replacing ${placeholder} with ${value}`);
+      finalUrl = finalUrl.replace(placeholder, value);
     });
+
+    console.log(`[HttpRequestBuilder] Final URL: ${finalUrl}`);
+    console.log(`[HttpRequestBuilder] Headers:`, headers);
 
     return {
       url: finalUrl,

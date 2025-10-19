@@ -77,3 +77,4 @@ export const REASONING_ANALYSIS_PROMPT = `Проанализируй запро�
   "shouldProceed": true,
   "recommendations": ["Рекомендации для пользователя"]
 }`;
+
