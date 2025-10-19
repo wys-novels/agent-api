@@ -11,7 +11,7 @@ export class ResponseFormatterService {
     private readonly classifierService: ClassifierService,
   ) {}
 
-  formatFinalResponse(executionResults: any[], originalMessage: string): string {
+  async formatFinalResponse(executionResults: any[], originalMessage: string): Promise<string> {
     const generateCommand = this.findGenerateCommand(originalMessage);
     
     if (!generateCommand) {
@@ -21,10 +21,10 @@ export class ResponseFormatterService {
     const insufficientDataResults = this.filterInsufficientDataResults(executionResults);
     
     if (insufficientDataResults.length > 0) {
-      return this.handleInsufficientData(insufficientDataResults, originalMessage);
+      return await this.handleInsufficientData(insufficientDataResults, originalMessage);
     }
 
-    return this.generateSuccessResponse(executionResults, generateCommand);
+    return await this.generateSuccessResponse(executionResults, generateCommand);
   }
 
   private findGenerateCommand(originalMessage: string) {
@@ -38,12 +38,15 @@ export class ResponseFormatterService {
     );
   }
 
-  private handleInsufficientData(insufficientDataResults: any[], originalMessage: string): string {
+  private async handleInsufficientData(insufficientDataResults: any[], originalMessage: string): Promise<string> {
     const context = this.buildInsufficientDataContext(insufficientDataResults);
     const prompt = this.buildInsufficientDataPrompt(originalMessage, context);
     
-    // В реальном коде здесь был бы вызов openaiService
-    return `Для выполнения запроса не хватает данных. ${context}`;
+    const response = await this.openaiService.generateAnswer({
+      messages: [{ role: 'user', content: prompt }],
+    });
+    
+    return response.content;
   }
 
   private buildInsufficientDataContext(results: any[]): string {
@@ -59,23 +62,51 @@ export class ResponseFormatterService {
 Для выполнения запроса не хватает данных:
 ${context}
 
-Попроси пользователя уточнить недостающую информацию и объясни, что именно нужно для выполнения запроса.`;
+Попроси пользователя уточнить недостающую информацию и объясни, что именно нужно для выполнения запроса.
+
+**Правила форматирования:**
+- Используй Markdown разметку для лучшей читаемости
+- Выделяй важную информацию жирным текстом (**текст**)
+- Используй списки для перечисления недостающих данных
+- Используй заголовки для структурирования информации
+- Выделяй ошибки и предупреждения жирным текстом
+- Структурируй ответ с заголовками и подзаголовками`;
   }
 
-  private generateSuccessResponse(executionResults: any[], generateCommand: any): string {
+  private async generateSuccessResponse(executionResults: any[], generateCommand: any): Promise<string> {
     const resultsContext = this.buildResultsContext(executionResults);
     const prompt = this.buildSuccessPrompt(generateCommand, resultsContext);
     
-    // В реальном коде здесь был бы вызов openaiService
-    return `Операция выполнена успешно. Результаты: ${resultsContext}`;
+    const response = await this.openaiService.generateAnswer({
+      messages: [{ role: 'user', content: prompt }],
+    });
+    
+    return response.content;
   }
 
   private buildResultsContext(executionResults: any[]): string {
     return executionResults.map((result, index) => {
       const status = result.success ? '✅ Успешно' : '❌ Ошибка';
+      let requestInfo = '';
+      let responseInfo = '';
+      
+      if (result.success) {
+        requestInfo = `Запрос: ${JSON.stringify(result.requestBody || result.requestParameters, null, 2)}`;
+        responseInfo = `Ответ: ${JSON.stringify(result.response, null, 2)}`;
+      } else {
+        // Специальная обработка для INSUFFICIENT_SCHEMA
+        if (result.errorType === 'SWAGGER_ERROR' && result.error?.includes('Swagger схема некорректна')) {
+          requestInfo = `Запрос: Не выполнен (проблема со схемой)`;
+          responseInfo = `Ошибка: ${result.error}`;
+        } else {
+          requestInfo = `Запрос: ${JSON.stringify(result.requestBody || result.requestParameters, null, 2)}`;
+          responseInfo = `Ответ: ${JSON.stringify(result.response, null, 2)}`;
+        }
+      }
+      
       return `Шаг ${result.step}: ${result.method} ${result.endpoint} - ${status}\n` +
-             `Запрос: ${JSON.stringify(result.requestBody || result.requestParameters, null, 2)}\n` +
-             `Ответ: ${JSON.stringify(result.response, null, 2)}\n`;
+             `${requestInfo}\n` +
+             `${responseInfo}\n`;
     }).join('\n');
   }
 
@@ -85,6 +116,17 @@ ${context}
 Результаты выполнения API вызовов:
 ${resultsContext}
 
-Сформируй понятный и структурированный ответ пользователю на основе полученных данных.`;
+Сформируй понятный и структурированный ответ пользователю на основе полученных данных.
+
+**Правила форматирования:**
+- Используй Markdown разметку для лучшей читаемости
+- Форматируй JSON с отступами и переносами строк в блоках кода
+- Выделяй код в блоки с указанием языка (json, javascript, etc.)
+- Используй списки для перечисления параметров
+- Выделяй важную информацию жирным текстом (**текст**)
+- Используй заголовки для структурирования информации
+- Для JSON используй блоки \`\`\`json ... \`\`\`
+- Для HTTP запросов используй блоки \`\`\`http ... \`\`\`
+- Структурируй ответ с заголовками и подзаголовками`;
   }
 }

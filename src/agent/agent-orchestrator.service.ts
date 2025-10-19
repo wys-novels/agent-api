@@ -1,9 +1,11 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { Observable, Subscriber } from 'rxjs';
 import { ClassifierService } from '../classifier/classifier.service';
 import { ApiPlannerService } from './api-planner.service';
 import { HttpExecutorService } from './http-executor.service';
 import { ResponseFormatterService } from './response-formatter.service';
 import { QueryResponse } from './dto/query-response.dto';
+import { StreamEvent } from './dto/stream-event.dto';
 import { ClassificationResult, ProcessedResult, HttpToolResult } from './interfaces/classification.interface';
 
 @Injectable()
@@ -22,7 +24,7 @@ export class AgentOrchestratorService {
 
     const classification = await this.classifyRequest(message);
     const result = await this.processClassification(classification, message);
-    return this.buildResponse(result);
+    return await this.buildResponse(result);
   }
 
   private async classifyRequest(message: string): Promise<ClassificationResult> {
@@ -77,7 +79,7 @@ export class AgentOrchestratorService {
       : message;
   }
 
-  private buildResponse(result: ProcessedResult): QueryResponse {
+  private async buildResponse(result: ProcessedResult): Promise<QueryResponse> {
     const response: QueryResponse = {
       tasks: result.tasks
     };
@@ -88,12 +90,120 @@ export class AgentOrchestratorService {
     
     if (result.executionResults) {
       response.executionResults = result.executionResults;
-      response.finalResponse = this.responseFormatter.formatFinalResponse(
+      response.finalResponse = await this.responseFormatter.formatFinalResponse(
         result.executionResults, 
         result.tasks[0]?.prompt || ''
       );
     }
     
     return response;
+  }
+
+  processQueryStream(message: string): Observable<StreamEvent> {
+    this.logger.log(`Starting streaming process for query: ${message}`);
+    
+    return new Observable(subscriber => {
+      this.processQueryWithStreaming(message, subscriber);
+    });
+  }
+
+  private async processQueryWithStreaming(message: string, subscriber: Subscriber<StreamEvent>) {
+    try {
+      // Этап 1: Классификация
+      subscriber.next({
+        type: 'classification',
+        data: { status: 'started' },
+        timestamp: Date.now()
+      });
+      
+      this.logger.log('Classifying request...');
+      const classification = await this.classifyRequest(message);
+      
+      subscriber.next({
+        type: 'classification',
+        data: { 
+          status: 'completed',
+          tasks: classification.tasks 
+        },
+        timestamp: Date.now()
+      });
+
+      // Этап 2: Обработка классификации
+      const hasHttpTool = classification.tasks.some(task => task.command === 'HTTP_TOOL');
+      
+      let apiPlan: any = null;
+      let executionResults: any = null;
+      
+      if (hasHttpTool) {
+        // Этап 2a: API Plan
+        subscriber.next({
+          type: 'apiPlan',
+          data: { status: 'started' },
+          timestamp: Date.now()
+        });
+        
+        const httpResult = await this.processHttpToolTasks(classification.tasks, message);
+        apiPlan = httpResult.apiPlan;
+        executionResults = httpResult.executionResults;
+        
+        subscriber.next({
+          type: 'apiPlan',
+          data: { 
+            status: 'completed',
+            plan: apiPlan 
+          },
+          timestamp: Date.now()
+        });
+
+        // Этап 2b: Execution Results
+        if (executionResults) {
+          subscriber.next({
+            type: 'executionResults',
+            data: { 
+              status: 'completed',
+              results: executionResults 
+            },
+            timestamp: Date.now()
+          });
+        }
+      }
+      
+      // Этап 3: Final Response
+      subscriber.next({
+        type: 'finalResponse',
+        data: { status: 'started' },
+        timestamp: Date.now()
+      });
+      
+      const result: ProcessedResult = {
+        tasks: classification.tasks,
+        apiPlan,
+        executionResults,
+      };
+      
+      const finalResponse = await this.buildResponse(result);
+      
+      subscriber.next({
+        type: 'finalResponse',
+        data: { 
+          status: 'completed',
+          response: finalResponse.finalResponse 
+        },
+        timestamp: Date.now()
+      });
+      
+      subscriber.complete();
+      
+    } catch (error) {
+      this.logger.error('Error in streaming process:', error);
+      subscriber.error({
+        type: 'error',
+        data: { 
+          error: error.message,
+          step: 'processing' 
+        },
+        timestamp: Date.now()
+      });
+    }
   }
 }

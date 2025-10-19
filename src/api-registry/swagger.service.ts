@@ -186,34 +186,27 @@ export class SwaggerService {
 
     // Обрабатываем request body
     if (requestBody) {
+      let resolvedSchema = null;
+      if (requestBody.content?.['application/json']?.schema) {
+        const schema = requestBody.content['application/json'].schema;
+        if (schema.$ref) {
+          resolvedSchema = this.resolveSchemaRef(schema.$ref, swaggerJson);
+        } else {
+          resolvedSchema = schema;
+        }
+      }
+      
       extractedParams.body = {
         required: requestBody.required || false,
         description: requestBody.description,
         content: requestBody.content,
-        schema: this.extractSchemaFromRequestBody(requestBody, swaggerJson),
+        schema: resolvedSchema,
       };
     }
 
     return extractedParams;
   }
 
-  private extractSchemaFromRequestBody(requestBody: any, swaggerJson?: any): any {
-    if (!requestBody.content || !requestBody.content['application/json']) {
-      return null;
-    }
-
-    const content = requestBody.content['application/json'];
-    if (!content.schema) {
-      return null;
-    }
-
-    // Если есть $ref, нужно разрешить его
-    if (content.schema.$ref) {
-      return this.resolveSchemaRef(content.schema.$ref, swaggerJson);
-    }
-
-    return content.schema;
-  }
 
   private resolveSchemaRef(ref: string, swaggerJson?: any): any {
     this.logger.log(`Resolving schema ref: ${ref}`);
@@ -282,11 +275,35 @@ export class SwaggerService {
     
     if (paths[endpointPath] && paths[endpointPath][methodLower]) {
       const operation = paths[endpointPath][methodLower];
+      
+      // Разрешаем $ref ссылки в requestBody
+      let resolvedRequestBody = operation.requestBody;
+      if (resolvedRequestBody?.content?.['application/json']?.schema?.$ref) {
+        const resolvedSchema = this.resolveSchemaRef(
+          resolvedRequestBody.content['application/json'].schema.$ref, 
+          swaggerJson
+        );
+        if (resolvedSchema && !resolvedSchema.$ref) {
+          this.logger.log(`Successfully resolved $ref in requestBody for ${method} ${endpointPath}`);
+          resolvedRequestBody = {
+            ...resolvedRequestBody,
+            content: {
+              'application/json': {
+                schema: resolvedSchema
+              }
+            }
+          };
+        } else {
+          this.logger.warn(`Failed to resolve $ref in requestBody for ${method} ${endpointPath}`);
+        }
+      }
+      
       return {
         parameters: operation.parameters || [],
-        requestBody: operation.requestBody,
+        requestBody: resolvedRequestBody,
         summary: operation.summary,
-        description: operation.description
+        description: operation.description,
+        swaggerJson: swaggerJson // Передаем swaggerJson для разрешения вложенных ссылок
       };
     }
     
@@ -294,7 +311,7 @@ export class SwaggerService {
   }
 
   // Метод для форматирования схемы body для промпта
-  formatRequestBodySchema(requestBody: any): string {
+  formatRequestBodySchema(requestBody: any, swaggerJson?: any): string {
     if (!requestBody || !requestBody.content) {
       return 'Нет body';
     }
@@ -306,36 +323,128 @@ export class SwaggerService {
 
     const schema = jsonContent.schema;
     
-    // Если есть $ref, пытаемся его разрешить
-    if (schema.$ref) {
-      return `Ссылка на схему: ${schema.$ref}`;
+    // Если это объект с полями (теперь $ref уже разрешены в getEndpointSchema)
+    if (schema.type === 'object' && schema.properties) {
+      return this.formatSchemaFields(schema, swaggerJson);
     }
+    
+    return JSON.stringify(schema, null, 2);
+  }
 
-    // Если это объект с полями
+  // Вспомогательный метод для форматирования полей схемы
+  private formatSchemaFields(schema: any, swaggerJson?: any): string {
+    const required = schema.required || [];
+    let description = 'Объект со следующими полями:\n';
+    
+    for (const [fieldName, fieldSchema] of Object.entries(schema.properties)) {
+      const isRequired = required.includes(fieldName);
+      const fieldInfo = fieldSchema as any;
+      
+      // Определяем тип поля
+      const fieldType = this.getFieldType(fieldInfo, swaggerJson);
+      
+      description += `- ${fieldName}${isRequired ? ' (ОБЯЗАТЕЛЬНО)' : ' (опционально)'}: ${fieldType}`;
+      
+      if (fieldInfo.description) {
+        description += ` - ${fieldInfo.description}`;
+      }
+      
+      if (fieldInfo.example) {
+        description += ` (пример: ${fieldInfo.example})`;
+      }
+      
+      // Добавляем enum значения если есть
+      if (fieldInfo.enum) {
+        description += ` (возможные значения: ${fieldInfo.enum.join(', ')})`;
+      }
+      
+      description += '\n';
+    }
+    
+    return description;
+  }
+
+  // Вспомогательный метод для определения типа поля
+  private getFieldType(fieldInfo: any, swaggerJson?: any): string {
+    // Если есть прямой тип
+    if (fieldInfo.type) {
+      return fieldInfo.type;
+    }
+    
+    // Если есть allOf с $ref
+    if (fieldInfo.allOf && fieldInfo.allOf.length > 0) {
+      const firstAllOf = fieldInfo.allOf[0];
+      if (firstAllOf.$ref) {
+        // Разрешаем ссылку и показываем структуру
+        const resolvedSchema = this.resolveSchemaRef(firstAllOf.$ref, swaggerJson);
+        if (resolvedSchema && !resolvedSchema.$ref) {
+          return this.formatNestedObject(resolvedSchema, swaggerJson);
+        }
+        const schemaName = firstAllOf.$ref.split('/').pop();
+        return `object (${schemaName})`;
+      }
+      if (firstAllOf.type) {
+        return firstAllOf.type;
+      }
+    }
+    
+    // Если есть $ref
+    if (fieldInfo.$ref) {
+      // Разрешаем ссылку и показываем структуру
+      const resolvedSchema = this.resolveSchemaRef(fieldInfo.$ref, swaggerJson);
+      if (resolvedSchema && !resolvedSchema.$ref) {
+        return this.formatNestedObject(resolvedSchema, swaggerJson);
+      }
+      const schemaName = fieldInfo.$ref.split('/').pop();
+      return `object (${schemaName})`;
+    }
+    
+    // Если есть enum
+    if (fieldInfo.enum) {
+      return `enum`;
+    }
+    
+    // Если есть items (массив)
+    if (fieldInfo.items) {
+      const itemType = this.getFieldType(fieldInfo.items, swaggerJson);
+      return `array<${itemType}>`;
+    }
+    
+    return 'unknown';
+  }
+
+  // Вспомогательный метод для форматирования вложенных объектов
+  private formatNestedObject(schema: any, swaggerJson?: any): string {
     if (schema.type === 'object' && schema.properties) {
       const required = schema.required || [];
-      let description = 'Объект со следующими полями:\n';
+      let result = 'object {\n';
       
       for (const [fieldName, fieldSchema] of Object.entries(schema.properties)) {
         const isRequired = required.includes(fieldName);
         const fieldInfo = fieldSchema as any;
+        const fieldType = this.getFieldType(fieldInfo, swaggerJson);
         
-        description += `- ${fieldName}${isRequired ? ' (ОБЯЗАТЕЛЬНО)' : ' (опционально)'}: ${fieldInfo.type || 'unknown'}`;
+        result += `  ${fieldName}${isRequired ? ' (ОБЯЗАТЕЛЬНО)' : ' (опционально)'}: ${fieldType}`;
         
         if (fieldInfo.description) {
-          description += ` - ${fieldInfo.description}`;
+          result += ` - ${fieldInfo.description}`;
         }
         
         if (fieldInfo.example) {
-          description += ` (пример: ${fieldInfo.example})`;
+          result += ` (пример: ${fieldInfo.example})`;
         }
         
-        description += '\n';
+        if (fieldInfo.enum) {
+          result += ` (возможные значения: ${fieldInfo.enum.join(', ')})`;
+        }
+        
+        result += '\n';
       }
       
-      return description;
+      result += '}';
+      return result;
     }
     
-    return JSON.stringify(schema, null, 2);
+    return `object (${schema.type || 'unknown'})`;
   }
 }

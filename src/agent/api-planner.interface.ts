@@ -86,6 +86,7 @@ export enum ExecutionErrorType {
 export enum ParameterValidationStatus {
   SUCCESS = 'SUCCESS',
   INSUFFICIENT_DATA = 'INSUFFICIENT_DATA',
+  INSUFFICIENT_SCHEMA = 'INSUFFICIENT_SCHEMA',
   ERROR = 'ERROR'
 }
 

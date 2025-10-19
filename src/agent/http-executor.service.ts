@@ -127,6 +127,11 @@ export class HttpExecutorService {
       return this.createErrorResult(step, ExecutionErrorType.INSUFFICIENT_DATA, parameterResult.message || 'Insufficient data');
     }
 
+    if (parameterResult.status === ParameterValidationStatus.INSUFFICIENT_SCHEMA) {
+      this.logger.warn(`Insufficient schema for step ${step.step}: ${parameterResult.message || 'Unknown error'}`);
+      return this.createErrorResult(step, ExecutionErrorType.SWAGGER_ERROR, parameterResult.message || 'Insufficient schema');
+    }
+
     if (parameterResult.status === ParameterValidationStatus.ERROR) {
       this.logger.error(`Parameter generation error for step ${step.step}: ${parameterResult.message || 'Unknown error'}`);
       return this.createErrorResult(step, ExecutionErrorType.PARAMETER_GENERATION_ERROR, parameterResult.message || 'Parameter generation error');
@@ -214,65 +219,116 @@ export class HttpExecutorService {
 
   private buildParameterContext(step: ApiCallPlan, swaggerSchema: any, previousResults: ExecutionResult[], userPrompt: string): string {
     const previousResultsText = this.formatStepContext(previousResults);
-    const bodyDescription = this.swaggerService.formatRequestBodySchema(swaggerSchema.requestBody);
+    const bodyDescription = this.swaggerService.formatRequestBodySchema(swaggerSchema.requestBody, swaggerSchema.swaggerJson);
+    
+    // Логирование для отладки
+    this.logger.log(`Swagger schema for step ${step.step}:`, JSON.stringify(swaggerSchema, null, 2));
+    this.logger.log(`Body description for step ${step.step}:`, bodyDescription);
+  
+    return `
+  <task>
+    Сгенерируй параметры и тело (body) для HTTP запроса на основе приведённых данных.
+  </task>
+  
+  <endpoint>
+    <method>${step.method}</method>
+    <url>${step.endpoint}</url>
+    <description>${step.description}</description>
+  </endpoint>
+  
+  <schema>
+    <parameters>
+      <query>${JSON.stringify(swaggerSchema.parameters?.filter(p => p.in === 'query') || [], null, 2)}</query>
+      <path>${JSON.stringify(swaggerSchema.parameters?.filter(p => p.in === 'path') || [], null, 2)}</path>
+      <header>${JSON.stringify(swaggerSchema.parameters?.filter(p => p.in === 'header') || [], null, 2)}</header>
+    </parameters>
+  
+    <body>
+      ${bodyDescription}
+    </body>
+  </schema>
+  
+  <context>
+    <userPrompt>${userPrompt}</userPrompt>
+    <previousResults>${previousResultsText}</previousResults>
+  </context>
+  
+  <generationRules>
+    Если метод запроса — POST, PUT или PATCH, и для обязательных полей нет значений в пользовательском запросе:
+    - Сначала ищи недостающие значения в:
+      1) запросе пользователя,
+      2) предыдущих результатах,
+      3) схеме параметров и тела запроса (типы, описания, enum, примеры, pattern).
+    - Соблюдай типы/описания/ограничения из схемы. Не придумывай форматы, если они не указаны.
+    - Идентификаторы ресурсов (например: id, userId, groupId, sleepId):
+      • Если это ссылка на уже существующую сущность (в path, query или body) — бери только из предусловий или previousResults.  
+        Если такого значения нет — верни INSUFFICIENT_DATA и явно укажи, какой id требуется.
+      • Если это ресурс создаётся и id генерируется сервером — не включай поле id в тело запроса, если оно не помечено как required/ client-supplied.
+      • Если поле — неидентифицирующий служебный ключ (например, idempotencyKey, requestId, correlationId) и схема допускает клиентское значение — можно сгенерировать безопасный уникальный токен (например, UUID-строку), следуя pattern/format из схемы. Если требований нет — используй простую уникальную строку-плейсхолдер.
+    - Для прочих полей, без которых запрос возможен, можно подставить простые реалистичные примеры, совместимые со схемой:
+      • Строки: "example", "test", "note"
+      • Числа: 1–10
+      • Логические: true/false
+    - Не выдумывай новые поля, которых нет в схеме. Не изменяй смысл запроса.
+    - Если endpoint содержит {path-параметры} и их значения неизвестны — верни INSUFFICIENT_DATA (не подставляй вымышленные id).
+  </generationRules>
 
-    return `Сгенерируй параметры и body для HTTP запроса.
+  
+  <criticalRules>
+    - ВНИМАТЕЛЬНО изучи endpoint: ${step.endpoint}
+    - Если в endpoint есть {параметр} (например, {id}, {userId}), то ОБЯЗАТЕЛЬНО создай параметр с location: "path"
+    - Path параметры ОБЯЗАТЕЛЬНЫ для замены {параметр} в URL
+    - Сначала определи, достаточно ли данных для выполнения запроса
+    - Если в схеме есть обязательные поля (required), но в запросе пользователя их нет — используй статус INSUFFICIENT_DATA
+    - Если данных достаточно — используй статус SUCCESS и заполни все параметры
+    - Извлекай значения из запроса пользователя или используй разумные значения по умолчанию
+    - Для timezone используй значения "Europe/Moscow", "UTC", "America/New_York"
+    - Если для POST/PUT/PATCH запроса схема body пустая или отсутствует, но по логике должен быть body — используй статус INSUFFICIENT_SCHEMA с сообщением "Swagger схема некорректна: отсутствует описание body для ${step.method} запроса"
+  </criticalRules>
+  
+  <examples>
+    <pathExamples>
+      Если endpoint: "/users/{id}/profile" -> создай параметр {"name": "id", "value": "123", "location": "path"}
+      Если endpoint: "/sleep-groups/{id}/sleeps" -> создай параметр {"name": "id", "value": "456", "location": "path"}
+    </pathExamples>
+  </examples>
+  
+  <outputFormat>
+    Верни ТОЛЬКО валидный JSON без markdown и текста вне JSON:
+  
+    Если данных достаточно:
+    {
+      "status": "SUCCESS",
+      "parameters": [
+        {"name": "param", "value": "value", "location": "query"},
+        {"name": "id", "value": "123", "location": "path"}
+      ],
+      "body": {
+        "key": "value"
+      }
+    }
+  
+    Если данных недостаточно:
+    {
+      "status": "INSUFFICIENT_DATA",
+      "message": "Для выполнения запроса не хватает данных: [укажи что именно нужно]",
+      "parameters": [],
+      "body": {}
+    }
 
-Эндпоинт: ${step.method} ${step.endpoint}
-Описание: ${step.description}
-
-Схема параметров:
-Query: ${JSON.stringify(swaggerSchema.parameters?.filter(p => p.in === 'query') || [], null, 2)}
-Path: ${JSON.stringify(swaggerSchema.parameters?.filter(p => p.in === 'path') || [], null, 2)}
-Header: ${JSON.stringify(swaggerSchema.parameters?.filter(p => p.in === 'header') || [], null, 2)}
-
-Схема Body (JSON):
-${bodyDescription}
-
-Запрос пользователя: "${userPrompt}"
-
-Предыдущие результаты:
-${previousResultsText}
-
-КРИТИЧЕСКИ ВАЖНО: 
-- ВНИМАТЕЛЬНО изучи endpoint: ${step.endpoint}
-- Если в endpoint есть {параметр} (например, {id}, {userId}), то ОБЯЗАТЕЛЬНО создай параметр с location: "path"
-- Path параметры ОБЯЗАТЕЛЬНЫ для замены {параметр} в URL
-- Сначала определи, достаточно ли данных для выполнения запроса
-- Если в схеме есть обязательные поля (required), но в запросе пользователя их нет - используй статус INSUFFICIENT_DATA
-- Если данных достаточно - используй статус SUCCESS и заполни все параметры
-- Извлекай значения из запроса пользователя или используй разумные значения по умолчанию
-- Для timezone используй значения типа "Europe/Moscow", "UTC", "America/New_York"
-
-Примеры path параметров:
-- Если endpoint: "/users/{id}/profile" -> создай параметр {"name": "id", "value": "123", "location": "path"}
-- Если endpoint: "/sleep-groups/{id}/sleeps" -> создай параметр {"name": "id", "value": "456", "location": "path"}
-
-Верни ТОЛЬКО валидный JSON без markdown блоков:
-
-Если данных достаточно:
-{
-  "status": "SUCCESS",
-  "parameters": [
-    {"name": "param", "value": "value", "location": "query"},
-    {"name": "id", "value": "123", "location": "path"}
-  ],
-  "body": {
-    "key": "value"
-  }
-}
-
-Если данных недостаточно:
-{
-  "status": "INSUFFICIENT_DATA",
-  "message": "Для выполнения запроса не хватает данных: [укажи что именно нужно]",
-  "parameters": [],
-  "body": {}
-}`;
+    Если схема Swagger некорректна:
+    {
+      "status": "INSUFFICIENT_SCHEMA",
+      "message": "Swagger схема некорректна: отсутствует описание body для POST запроса",
+      "parameters": [],
+      "body": {}
+    }
+  </outputFormat>
+  `;
   }
 
   private async getAIResponse(prompt: string) {
-    this.logger.log(`Prompt: ${prompt.substring(0, 500)}...`);
+    this.logger.log(`Full Prompt:\n${prompt}`);
     
     const response = await this.openaiService.generateAnswer({
       messages: [{ role: 'user', content: prompt }],
@@ -313,6 +369,16 @@ ${previousResultsText}
       this.logger.warn(`Insufficient data: ${parsed.message}`);
       return {
         status: ParameterValidationStatus.INSUFFICIENT_DATA,
+        parameters: [],
+        body: null,
+        message: parsed.message
+      };
+    }
+    
+    if (status === ParameterValidationStatus.INSUFFICIENT_SCHEMA) {
+      this.logger.warn(`Insufficient schema: ${parsed.message}`);
+      return {
+        status: ParameterValidationStatus.INSUFFICIENT_SCHEMA,
         parameters: [],
         body: null,
         message: parsed.message
