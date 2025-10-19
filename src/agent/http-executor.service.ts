@@ -3,6 +3,7 @@ import { HttpService } from '@nestjs/axios';
 import { OpenAIService } from '../openai/openai.service';
 import { SwaggerService } from '../api-registry/swagger.service';
 import { ApiCallPlan, ExecutionResult, ParameterValue, ExecutionErrorType, StepContext, StandardizedError, ParameterValidationStatus, ParameterGenerationResult } from './api-planner.interface';
+import { HTTP_STATUS, ERROR_MESSAGES } from './constants/http.constants';
 import { firstValueFrom } from 'rxjs';
 
 @Injectable()
@@ -102,46 +103,14 @@ export class HttpExecutorService {
     previousResults: ExecutionResult[], 
     userPrompt: string
   ): Promise<ExecutionResult> {
-    // Генерируем параметры для этого шага
     const parameterResult = await this.generateParametersForStep(step, previousResults, userPrompt);
-
-    // Проверяем статус генерации параметров
-    if (parameterResult.status === ParameterValidationStatus.INSUFFICIENT_DATA) {
-      this.logger.warn(`Insufficient data for step ${step.step}: ${parameterResult.message}`);
-      return {
-        step: step.step,
-        endpoint: step.endpoint,
-        method: step.method,
-        requestParameters: [],
-        requestBody: null,
-        response: null,
-        responseStatus: 0,
-        success: false,
-        error: parameterResult.message,
-        errorType: ExecutionErrorType.INSUFFICIENT_DATA,
-        errorDetails: { message: parameterResult.message }
-      };
+    
+    const validationResult = this.validateParameterResult(parameterResult, step);
+    if (validationResult) {
+      return validationResult;
     }
 
-    if (parameterResult.status === ParameterValidationStatus.ERROR) {
-      this.logger.error(`Parameter generation error for step ${step.step}: ${parameterResult.message}`);
-      return {
-        step: step.step,
-        endpoint: step.endpoint,
-        method: step.method,
-        requestParameters: [],
-        requestBody: null,
-        response: null,
-        responseStatus: 0,
-        success: false,
-        error: parameterResult.message,
-        errorType: ExecutionErrorType.PARAMETER_GENERATION_ERROR,
-        errorDetails: { message: parameterResult.message }
-      };
-    }
-
-    // Выполняем HTTP запрос
-    const { response, status } = await this.makeHttpRequest(
+    const httpResult = await this.makeHttpRequest(
       step.baseUrl,
       step.endpoint,
       step.method,
@@ -149,16 +118,52 @@ export class HttpExecutorService {
       parameterResult.body
     );
 
+    return this.buildExecutionResult(step, parameterResult, httpResult);
+  }
+
+  private validateParameterResult(parameterResult: ParameterGenerationResult, step: ApiCallPlan): ExecutionResult | null {
+    if (parameterResult.status === ParameterValidationStatus.INSUFFICIENT_DATA) {
+      this.logger.warn(`Insufficient data for step ${step.step}: ${parameterResult.message || 'Unknown error'}`);
+      return this.createErrorResult(step, ExecutionErrorType.INSUFFICIENT_DATA, parameterResult.message || 'Insufficient data');
+    }
+
+    if (parameterResult.status === ParameterValidationStatus.ERROR) {
+      this.logger.error(`Parameter generation error for step ${step.step}: ${parameterResult.message || 'Unknown error'}`);
+      return this.createErrorResult(step, ExecutionErrorType.PARAMETER_GENERATION_ERROR, parameterResult.message || 'Parameter generation error');
+    }
+
+    return null;
+  }
+
+  private createErrorResult(step: ApiCallPlan, errorType: ExecutionErrorType, message: string): ExecutionResult {
+    return {
+      step: step.step,
+      endpoint: step.endpoint,
+      method: step.method,
+      requestParameters: [],
+      requestBody: null,
+      response: null,
+      responseStatus: 0,
+      success: false,
+      error: message,
+      errorType,
+      errorDetails: { message }
+    };
+  }
+
+  private buildExecutionResult(step: ApiCallPlan, parameterResult: ParameterGenerationResult, httpResult: { response: any; status: number }): ExecutionResult {
+    const isSuccess = httpResult.status >= HTTP_STATUS.SUCCESS_MIN && httpResult.status <= HTTP_STATUS.SUCCESS_MAX;
+    
     return {
       step: step.step,
       endpoint: step.endpoint,
       method: step.method,
       requestParameters: parameterResult.parameters,
       requestBody: parameterResult.body,
-      response,
-      responseStatus: status,
-      success: status >= 200 && status < 300,
-      error: status >= 400 ? `HTTP ${status}: ${JSON.stringify(response)}` : undefined,
+      response: httpResult.response,
+      responseStatus: httpResult.status,
+      success: isSuccess,
+      error: !isSuccess ? `HTTP ${httpResult.status}: ${JSON.stringify(httpResult.response)}` : undefined,
     };
   }
 
@@ -167,41 +172,51 @@ export class HttpExecutorService {
     previousResults: ExecutionResult[], 
     userPrompt: string
   ): Promise<ParameterGenerationResult> {
-    
     this.logger.log(`Generating parameters for step ${step.step}`);
 
     try {
-      // Получаем схему из Swagger через SwaggerService
-      const swaggerUrl = await this.getSwaggerUrlForStep(step);
-      if (!swaggerUrl) {
-        throw this.createStandardizedError(
-          ExecutionErrorType.SWAGGER_ERROR,
-          `No swagger URL found for step ${step.step}`,
-          { step: step.step }
-        );
-      }
+      const swaggerSchema = await this.getSwaggerSchema(step);
+      const context = this.buildParameterContext(step, swaggerSchema, previousResults, userPrompt);
+      const response = await this.getAIResponse(context);
+      return this.parseParameterResponse(response, step);
+    } catch (error) {
+      this.logger.error(`Failed to generate parameters for step ${step.step}: ${error.message}`);
+      return this.createParameterError(error.message);
+    }
+  }
 
-      const swaggerSchema = await this.swaggerService.getEndpointSchema(
-        swaggerUrl, 
-        step.endpoint, 
-        step.method
+  private async getSwaggerSchema(step: ApiCallPlan) {
+    const swaggerUrl = await this.getSwaggerUrlForStep(step);
+    if (!swaggerUrl) {
+      throw this.createStandardizedError(
+        ExecutionErrorType.SWAGGER_ERROR,
+        `No swagger URL found for step ${step.step}`,
+        { step: step.step }
       );
+    }
 
-      if (!swaggerSchema) {
-        throw this.createStandardizedError(
-          ExecutionErrorType.SWAGGER_ERROR,
-          `Endpoint ${step.method} ${step.endpoint} not found in Swagger`,
-          { step: step.step, endpoint: step.endpoint, method: step.method }
-        );
-      }
+    const swaggerSchema = await this.swaggerService.getEndpointSchema(
+      swaggerUrl, 
+      step.endpoint, 
+      step.method
+    );
 
-      // Формируем контекст из предыдущих результатов
-      const previousResultsText = this.formatStepContext(previousResults);
+    if (!swaggerSchema) {
+      throw this.createStandardizedError(
+        ExecutionErrorType.SWAGGER_ERROR,
+        `Endpoint ${step.method} ${step.endpoint} not found in Swagger`,
+        { step: step.step, endpoint: step.endpoint, method: step.method }
+      );
+    }
 
-      // Формируем описание схемы body через SwaggerService
-      const bodyDescription = this.swaggerService.formatRequestBodySchema(swaggerSchema.requestBody);
+    return swaggerSchema;
+  }
 
-      const prompt = `Сгенерируй параметры и body для HTTP запроса.
+  private buildParameterContext(step: ApiCallPlan, swaggerSchema: any, previousResults: ExecutionResult[], userPrompt: string): string {
+    const previousResultsText = this.formatStepContext(previousResults);
+    const bodyDescription = this.swaggerService.formatRequestBodySchema(swaggerSchema.requestBody);
+
+    return `Сгенерируй параметры и body для HTTP запроса.
 
 Эндпоинт: ${step.method} ${step.endpoint}
 Описание: ${step.description}
@@ -254,63 +269,70 @@ ${previousResultsText}
   "parameters": [],
   "body": {}
 }`;
+  }
 
-      this.logger.log(`Prompt for step ${step.step}: ${prompt.substring(0, 500)}...`);
+  private async getAIResponse(prompt: string) {
+    this.logger.log(`Prompt: ${prompt.substring(0, 500)}...`);
+    
+    const response = await this.openaiService.generateAnswer({
+      messages: [{ role: 'user', content: prompt }],
+    });
 
-      const response = await this.openaiService.generateAnswer({
-        messages: [{ role: 'user', content: prompt }],
-      });
+    this.logger.log(`AI Response: ${response.content}`);
+    return response.content;
+  }
 
-      this.logger.log(`AI Response for step ${step.step}: ${response.content}`);
+  private parseParameterResponse(response: string, step: ApiCallPlan): ParameterGenerationResult {
+    const jsonContent = this.extractJsonFromResponse(response);
+    const parsed = JSON.parse(jsonContent);
+    
+    this.logger.log(`Parsed parameters for step ${step.step}: ${JSON.stringify(parsed)}`);
+    this.logPathParameters(parsed, step);
+    
+    return this.buildParameterResult(parsed);
+  }
 
-      // Извлекаем JSON из markdown блока если есть
-      let jsonContent = response.content;
-      const jsonMatch = jsonContent.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
-      if (jsonMatch) {
-        jsonContent = jsonMatch[1];
-      }
-      
-      const parsed = JSON.parse(jsonContent);
-      this.logger.log(`Parsed parameters for step ${step.step}: ${JSON.stringify(parsed)}`);
-      
-      // Дополнительное логирование для path параметров
-      const pathParams = parsed.parameters?.filter((p: any) => p.location === 'path') || [];
-      if (pathParams.length > 0) {
-        this.logger.log(`Generated path parameters for step ${step.step}:`, pathParams);
-      } else {
-        this.logger.warn(`No path parameters generated for step ${step.step} with endpoint: ${step.endpoint}`);
-      }
-      
-      // Проверяем статус ответа
-      const status = parsed.status as ParameterValidationStatus;
-      
-      if (status === ParameterValidationStatus.INSUFFICIENT_DATA) {
-        this.logger.warn(`Insufficient data for step ${step.step}: ${parsed.message}`);
-        return {
-          status: ParameterValidationStatus.INSUFFICIENT_DATA,
-          parameters: [],
-          body: null,
-          message: parsed.message
-        };
-      }
-      
+  private extractJsonFromResponse(response: string): string {
+    const jsonMatch = response.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
+    return jsonMatch ? jsonMatch[1] : response;
+  }
+
+  private logPathParameters(parsed: any, step: ApiCallPlan) {
+    const pathParams = parsed.parameters?.filter((p: any) => p.location === 'path') || [];
+    if (pathParams.length > 0) {
+      this.logger.log(`Generated path parameters for step ${step.step}:`, pathParams);
+    } else {
+      this.logger.warn(`No path parameters generated for step ${step.step} with endpoint: ${step.endpoint}`);
+    }
+  }
+
+  private buildParameterResult(parsed: any): ParameterGenerationResult {
+    const status = parsed.status as ParameterValidationStatus;
+    
+    if (status === ParameterValidationStatus.INSUFFICIENT_DATA) {
+      this.logger.warn(`Insufficient data: ${parsed.message}`);
       return {
-        status: status || ParameterValidationStatus.SUCCESS,
-        parameters: parsed.parameters || [],
-        body: parsed.body || null,
-      };
-
-    } catch (error) {
-      this.logger.error(`Failed to generate parameters for step ${step.step}: ${error.message}`);
-      
-      // Возвращаем ошибку в случае парсинга
-      return {
-        status: ParameterValidationStatus.ERROR,
+        status: ParameterValidationStatus.INSUFFICIENT_DATA,
         parameters: [],
         body: null,
-        message: `Ошибка парсинга ответа ИИ: ${error.message}`
+        message: parsed.message
       };
     }
+    
+    return {
+      status: status || ParameterValidationStatus.SUCCESS,
+      parameters: parsed.parameters || [],
+      body: parsed.body || null,
+    };
+  }
+
+  private createParameterError(message: string): ParameterGenerationResult {
+    return {
+      status: ParameterValidationStatus.ERROR,
+      parameters: [],
+      body: null,
+      message: `Ошибка парсинга ответа ИИ: ${message}`
+    };
   }
 
   private async makeHttpRequest(

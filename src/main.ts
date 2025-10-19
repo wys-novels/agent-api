@@ -3,6 +3,7 @@ import { NestFactory } from '@nestjs/core';
 import { Logger, ValidationPipe } from '@nestjs/common';
 import { AppModule } from './app.module';
 import { ConfigService } from './config/config.service';
+import { GlobalExceptionFilter } from './common/filters/global-exception.filter';
 
 async function bootstrap() {
   const logger = new Logger('Bootstrap');
@@ -25,6 +26,9 @@ async function bootstrap() {
     forbidNonWhitelisted: true,
     transform: true,
   }));
+  
+  // Глобальная обработка ошибок
+  app.useGlobalFilters(new GlobalExceptionFilter());
   
   const port = configService.port;
   await app.listen(port);

@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import OpenAI from 'openai';
 import { ConfigService } from '../config/config.service';
 import { IOpenAIService, IChatRequest, IChatResponse } from './openai.interface';
+import { ERROR_MESSAGES } from '../agent/constants/http.constants';
 
 @Injectable()
 export class OpenAIService implements IOpenAIService {
@@ -15,7 +16,7 @@ export class OpenAIService implements IOpenAIService {
     const apiKey = await this.config.getOpenAIApiKey();
     
     if (!apiKey) {
-      throw new Error('OpenAI API key not configured');
+      throw new Error(ERROR_MESSAGES.OPENAI_API_KEY_NOT_CONFIGURED);
     }
 
     // Пересоздаём клиента только если ключ изменился
@@ -48,7 +49,7 @@ export class OpenAIService implements IOpenAIService {
 
       const content = response.choices[0]?.message?.content;
       if (!content) {
-        throw new Error('No content received from OpenAI');
+        throw new Error(ERROR_MESSAGES.NO_CONTENT_RECEIVED);
       }
 
       return {

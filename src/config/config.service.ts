@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { IConfig } from './config.interface';
 import { VaultService } from '../vault/vault.service';
+import { DEFAULT_CONFIG, ERROR_MESSAGES } from '../agent/constants/http.constants';
 
 @Injectable()
 export class ConfigService implements IConfig {
@@ -117,17 +118,17 @@ export class ConfigService implements IConfig {
       const lifeSecrets = await this.vaultService.readSecret('life');
       
       return {
-        model: lifeSecrets?.openai_model || 'gpt-4o',
-        temperature: parseFloat(lifeSecrets?.openai_temperature || '0.7'),
-        maxTokens: parseInt(lifeSecrets?.openai_max_tokens || '1000'),
+        model: lifeSecrets?.openai_model || DEFAULT_CONFIG.MODEL,
+        temperature: parseFloat(lifeSecrets?.openai_temperature || DEFAULT_CONFIG.TEMPERATURE.toString()),
+        maxTokens: parseInt(lifeSecrets?.openai_max_tokens || DEFAULT_CONFIG.MAX_TOKENS.toString()),
       };
     } catch (error) {
       this.logger.error('Failed to get OpenAI config from Vault:', error.message);
       // Возвращаем значения по умолчанию
       return {
-        model: 'gpt-4o',
-        temperature: 0.7,
-        maxTokens: 1000,
+        model: DEFAULT_CONFIG.MODEL,
+        temperature: DEFAULT_CONFIG.TEMPERATURE,
+        maxTokens: DEFAULT_CONFIG.MAX_TOKENS,
       };
     }
   }
